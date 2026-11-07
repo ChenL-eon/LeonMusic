@@ -1,0 +1,33 @@
+# ---- 依赖 ----
+node_modules/
+
+# ---- 前端构建产物 ----
+dist/
+
+# ---- Rust ----
+src-tauri/target/
+
+# ---- Tauri 生成物（tauri android init / tauri icon 的产物，可重建）----
+src-tauri/gen/
+
+# ---- 签名文件：绝对不能提交 ----
+*.jks
+*.keystore
+keystore.properties
+*.p12
+
+# ---- Python（android-overlay/apply.py 的缓存）----
+__pycache__/
+*.pyc
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- 本地日志 ----
+*.log
+
+# ---- 本地调试工作台（探针脚本、截图、构建日志，不入库）----
+build/

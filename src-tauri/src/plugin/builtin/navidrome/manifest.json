@@ -1,0 +1,34 @@
+{
+  "id": "navidrome",
+  "name": "Navidrome",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "接入自建 Navidrome（以及任何兼容 Subsonic API 的服务，如 Airsonic / Gonic / LMS）。所有请求直连你的服务器，不经过任何第三方。",
+  "author": "LeonMusic",
+  "main": "index.js",
+  "capabilities": ["search", "stream", "lyric"],
+  "config": [
+    {
+      "key": "baseUrl",
+      "label": "服务器地址",
+      "fieldType": "string",
+      "default": "",
+      "required": true,
+      "placeholder": "https://music.example.com"
+    },
+    {
+      "key": "username",
+      "label": "用户名",
+      "fieldType": "string",
+      "default": "",
+      "required": true
+    },
+    {
+      "key": "password",
+      "label": "密码",
+      "fieldType": "password",
+      "default": "",
+      "required": true
+    }
+  ]
+}

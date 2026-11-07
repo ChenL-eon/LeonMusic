@@ -1,0 +1,23 @@
+<!--
+  追加到 Tauri 生成的 app/src/main/AndroidManifest.xml 的 <manifest> 下。
+  由 android-overlay/apply.py 自动合并，不要手工整份替换。
+-->
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+
+<!-- 前台服务：Android 8 起必须 FOREGROUND_SERVICE；Android 14 起还必须声明具体类型 -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+<!-- 通知栏播放控制（Android 13 起为运行时权限，被拒不崩、只是没有通知） -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+<!-- 本地媒体库：33 起用 READ_MEDIA_AUDIO，32 及以下才用 READ_EXTERNAL_STORAGE -->
+<uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+<uses-permission
+    android:name="android.permission.READ_EXTERNAL_STORAGE"
+    android:maxSdkVersion="32" />
+
+<!-- 电池优化白名单引导：必须由用户主动点击，不能静默申请 -->
+<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />

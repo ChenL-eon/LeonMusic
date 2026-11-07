@@ -1,0 +1,466 @@
+/* ==========================================================================
+   LeonMusic 设计系统
+   - 只用 CSS 变量，不引 UI 库
+   - 主题：<html data-theme="dark|light">
+   - 主色：--accent，可在设置里改
+   ========================================================================== */
+
+:root {
+  --accent: #7c5cff;
+  --accent-2: #3dd6d0;
+
+  /* 无框窗口自绘标题栏高度（TitleBar.vue 同步使用）。
+     Android 端没有标题栏，由 :root 默认 0 + 桌面 media 覆盖。 */
+  --titlebar-h: 0px;
+
+  --radius-s: 8px;
+  --radius-m: 14px;
+  --radius-l: 22px;
+
+  /* 系统安全区。
+     Android 侧 Activity 走了 enableEdgeToEdge()，WebView 会铺到状态栏和
+     手势条下面，所以每个「贴边」的容器都要自己让开。
+     env() 在 WebView 156 上实测有效（顶 46 / 底 20），但旧 WebView 会返回
+     空值 —— 用 0px 兜底，别让 var() 失效导致整条声明被丢弃。 */
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+
+  /* 桌面播放条高度。移动端不用它 —— 手机上是行高 auto，由播放条自己撑开 */
+  --playerbar-h: 92px;
+
+  --font: "Segoe UI Variable", "Segoe UI", -apple-system, "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  /*
+   * 歌词字号。
+   * `-user` 是用户在设置页里拉的那个值（由 settings store 写到 :root 内联样式），
+   * `--lyric-size` 才是真正渲染用的值 —— 手机屏幕上给它加个 24px 上限，
+   * 否则用户在桌面把字号拉到 56px，换到手机上每行只剩五六个字。
+   */
+  --lyric-size-user: 34px;
+  --lyric-size: var(--lyric-size-user);
+
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 桌面端才有自绘标题栏（无框窗口）；移动端保持 0。
+   861px 断点与下面 .shell 的 860px 移动断点互补。 */
+@media (min-width: 861px) {
+  :root {
+    --titlebar-h: 38px;
+  }
+}
+
+/* 播放页沉浸背景（深色专辑图）时，TitleBar 的浅色底衬会形成一条
+   浅色带 —— 属性由 NowPlaying 的 immersive watch 同步到根元素。
+   :root 前缀提高特异性，压过 scoped 组件样式的 .titlebar[data-v]。 */
+:root[data-immersive] .titlebar {
+  background: transparent;
+}
+
+html[data-theme="dark"] {
+  --bg: #0a0a0f;
+  --bg-grad: radial-gradient(1200px 600px at 12% -10%, #1d1736 0%, transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, #10262a 0%, transparent 55%);
+  --panel: #121219;
+  --panel-2: #181820;
+  --panel-3: #202029;
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #f2f2f7;
+  --text-2: #a7a7b8;
+  --text-3: #6e6e80;
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(255, 255, 255, 0.1);
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  --cover-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+html[data-theme="light"] {
+  --bg: #f4f4f8;
+  --bg-grad: radial-gradient(1200px 600px at 12% -10%, #e6e0ff 0%, transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, #d8f5f3 0%, transparent 55%);
+  --panel: #ffffff;
+  --panel-2: #f7f7fb;
+  --panel-3: #eeeef5;
+  --border: rgba(20, 20, 40, 0.08);
+  --border-strong: rgba(20, 20, 40, 0.16);
+  --text: #16161f;
+  --text-2: #5c5c70;
+  --text-3: #8e8ea3;
+  --hover: rgba(20, 20, 40, 0.05);
+  --active: rgba(20, 20, 40, 0.09);
+  --shadow: 0 20px 50px rgba(30, 30, 60, 0.12);
+  --cover-shadow: 0 24px 60px rgba(30, 30, 60, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  background-image: var(--bg-grad);
+  background-attachment: fixed;
+  color: var(--text);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  /* 触摸端基线：去掉 300ms 双击缩放延迟、去掉安卓点击时的青色高亮块、
+     禁止长按选词（拖进度条时最容易被触发） */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+}
+
+/* 只在触摸设备上禁选：桌面上还要能复制歌名/路径 */
+@media (hover: none) {
+  body {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+input {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 布局 ---------- */
+
+/*
+ * 外壳栅格。
+ *
+ * 三层纵向结构统一由 grid 行控制，行高用变量，移动端覆盖。
+ * 安全区用 padding 而不是把行撑高：背景（body 的渐变）依然铺到状态栏
+ * 和手势条下面，看起来是沉浸式，但内容不会钻进去。
+ *
+ * 高度用 dvh 而非 vh：Android 上 vh 取的是「含系统栏的布局视口」，
+ * 配合 edge-to-edge 偶尔会多出几十像素，导致底栏被推到屏幕外。
+ */
+.shell {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--playerbar-h);
+  height: 100vh;
+  height: 100dvh;
+  padding-top: var(--sat);
+  padding-bottom: var(--sab);
+  padding-left: var(--sal);
+  padding-right: var(--sar);
+  box-sizing: border-box;
+  gap: 0;
+}
+
+.sidebar {
+  grid-column: 1;
+  grid-row: 1;
+  /* 无框窗口：顶部让出自绘标题栏（原 22px = 系统标题栏去掉后的视觉还原） */
+  padding: calc(var(--titlebar-h) + 14px) 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+
+.main {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: calc(var(--titlebar-h) + 14px) 26px 8px 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.player-bar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  padding: 0 22px 14px;
+}
+
+/* ---------- 通用 ---------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.18s var(--ease), transform 0.12s var(--ease),
+    opacity 0.18s;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: var(--active);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  box-shadow: 0 8px 24px -8px var(--accent);
+}
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--text-2);
+}
+.btn.ghost:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+}
+
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  transition: background 0.16s, color 0.16s, transform 0.12s;
+}
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.icon-btn:active {
+  transform: scale(0.94);
+}
+.icon-btn.active {
+  color: var(--accent);
+}
+
+.page-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px;
+}
+.page-sub {
+  color: var(--text-2);
+  font-size: 13px;
+  margin: 0 0 18px;
+}
+
+.muted {
+  color: var(--text-2);
+}
+.dim {
+  color: var(--text-3);
+}
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--text-3);
+  font-size: 14px;
+  text-align: center;
+}
+.empty .big {
+  font-size: 34px;
+  opacity: 0.5;
+}
+
+.scroll {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/* ---------- 移动端：底部导航 ---------- */
+
+/*
+ * 断点 860 而不是常见的 760：
+ * - 桌面窗口 minWidth 是 940，不会误伤；
+ * - 手机横屏（844×390）和折叠屏内屏（~800）也要走移动布局，
+ *   否则 800 宽度下播放条的三栏栅格会把时间/按钮挤成一团。
+ */
+@media (max-width: 860px) {
+  :root {
+    /* 竖屏下一行歌词 34px 太宽，中文 8 个字就折行 */
+    --lyric-size: min(var(--lyric-size-user, 34px), 24px);
+    --radius-l: 18px;
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    /* 播放条与 tab 用 auto：内容撑多高就多高。
+       以前写死 78px，而移动端播放条其实要两行（见 PlayerBar），
+       于是控制键溢出被裁，截图上播放键「浮」在封面上。 */
+    grid-template-rows: minmax(0, 1fr) auto auto;
+  }
+  .sidebar {
+    grid-column: 1;
+    grid-row: 3;
+    padding: 0;
+    gap: 0;
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--panel) 72%, transparent);
+    backdrop-filter: blur(20px);
+  }
+  .main {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 16px 14px 6px;
+  }
+  .player-bar {
+    grid-column: 1;
+    grid-row: 2;
+    /* 底部 4px 是播放条与底部 tab 的呼吸，不靠 margin 是为了让两块的
+       背景色各自延伸到边 */
+    padding: 0 8px 4px;
+  }
+
+  /* 触摸目标：手指比鼠标粗，38px 的圆形按钮实测点不准 */
+  .btn {
+    height: 42px;
+    padding: 0 18px;
+  }
+  .icon-btn {
+    width: 42px;
+    height: 42px;
+  }
+  .page-title {
+    font-size: 21px;
+  }
+  .page-sub {
+    font-size: 12.5px;
+    margin-bottom: 12px;
+  }
+  .empty {
+    padding: 44px 16px;
+    font-size: 13px;
+  }
+
+  /* 滚动容器加惯性 + 独立滚动，避免拖列表时把外层一起拽动 */
+  .scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    /* 给底部留一点余量，最后一行不会被播放条压住 */
+    padding-bottom: 8px;
+  }
+
+  /*
+   * 输入框字号必须 ≥16px。
+   * Android WebView（和 iOS Safari 一样）在聚焦字号小于 16px 的输入框时
+   * 会自动放大整个页面，且不会自动缩回去 —— 用户点一下搜索框，界面就
+   * 卡在放大状态，还会把底部播放条顶出屏幕。
+   * 各组件里的 13/14px 会被这条覆盖，用 !important 是刻意的。
+   */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* 隐藏桌面才用得到的细滚动条（手指操作不需要） */
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+/* 手机横屏：高度只有 390 左右，纵向三块要瘦身 */
+@media (max-width: 900px) and (max-height: 520px) {
+  :root {
+    --lyric-size: min(var(--lyric-size-user, 34px), 18px);
+  }
+  .main {
+    padding-top: 8px;
+    padding-bottom: 2px;
+  }
+
+  /*
+   * 横屏最稀缺的是高度：393px 要分给「内容 + 播放条(71) + tab(59)」，
+   * 光标题带副标题就吃掉 55px。副标题是解释性文字，横屏下先让位。
+   */
+  .page-sub {
+    display: none;
+  }
+  .page-title {
+    font-size: 18px;
+    margin-bottom: 0;
+  }
+  /* 横向空间反而富余，页面级的工具条可以回到一行（见各页面自己的规则） */
+  .scroll {
+    padding-bottom: 4px;
+  }
+}

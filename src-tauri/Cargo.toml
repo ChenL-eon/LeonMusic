@@ -1,0 +1,146 @@
+[package]
+name = "leonmusic"
+version = "1.0.0"
+description = "LeonMusic - Rust-core music player (Tauri v2)"
+authors = ["Leon"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "leonmusic_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# prod 构建必须显式启用：tauri 的 dev/prod 判定 = `dev = !custom_protocol`。
+# 不带这个 feature 的 release 产物会把 devUrl (localhost:1420) 编进 exe，
+# WebView 启动就直连 vite dev server——server 不在，窗口直接「localhost
+# 拒绝连接」白屏。tauri CLI 会自动带上它，但本项目裸 cargo 构建，
+# 所以构建命令必须固定为：
+#   cargo build --release --features custom-protocol
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ---------- app shell ----------
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-os = "2"
+# 系统默认浏览器打开外链（「更新与关于」→「前往下载」）
+open = "5"
+
+# ---------- serialization / errors ----------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+
+# ---------- audio core ----------
+symphonia = { version = "0.5", features = ["all"] }
+cpal = "0.17"
+rtrb = "0.4"               # 实时安全 SPSC 环形缓冲（音频回调 ← 解码线程）
+opus-pure = "0.2"          # pure-Rust Opus (RFC 6716) + Ogg Opus (RFC 7845)
+
+# ---------- local media / persistence ----------
+lofty = "0.22"
+rusqlite = { version = "0.40", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# ---------- network / cache ----------
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "rustls-tls",
+  "gzip",
+  "charset",
+  "blocking",
+] }
+futures-util = "0.3"
+
+# ---------- plugin sandbox ----------
+boa_engine = "0.22"
+
+# 插件沙箱的加密原语。网易云 weapi/eapi 需要 AES-128-CBC/ECB 与 RSA 无填充，
+# 沙箱里没有 Node 的 crypto，所以这层放在宿主侧暴露成 leon.crypto.*。
+# 全部是纯 Rust 实现，Android 交叉编译无额外负担。
+aes = "0.8"
+cbc = "0.1"
+rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+
+# 扫码登录：插件只负责给出登录 URL，二维码由宿主渲染成 SVG。
+# 纯 Rust、无 C 依赖，Android 交叉编译无额外负担；只开 svg，避开 image。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+# ---------- misc ----------
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.23"
+dirs = "7"
+url = "2"
+percent-encoding = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.9.5"
+md5 = "0.8.1"
+sha1 = "0.10.7"
+
+# ---------- platform: windows ----------
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Media",
+  "Media_Control",
+  "Media_Playback",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_WinRT",
+  "Win32_System_WinRT_Media",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# ---------- platform: android ----------
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+
+# Android 上 boa 的 nan-boxing 会崩。
+#
+# nan_boxed 实现把 64 位指针塞进 f64 的尾数位，只保留低 48 位
+# (`MASK_POINTER_VALUE`)，运行期断言「掩码后必须等于原值」。Android
+# aarch64 的分配器（scudo）+ HyperOS 的 top-byte-ignore 会给堆指针打
+# 高位 tag，断言必然失败：
+#   "this platform is not compatible with a nan-boxed `JsValueInner`"
+# 表现是**所有**音源插件调用（搜索 / 解析播放地址 / 歌词）panic，
+# 前端只看到 `plugin: join: task N panicked`。
+#
+# 官方给的出口就是 `jsvalue-enum`：用 enum 代替位打包。只在这一个
+# target 上付代价，桌面端继续用更快的 nan-boxing。
+boa_engine = { version = "0.22", features = ["jsvalue-enum"] }
+
+# ---------- desktop-only plugins ----------
+# Android 上没有「全局快捷键」「单实例」的概念，依赖本身也能省掉编译时间
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+# unwind（默认）而不是 abort：任何线程 panic 只杀自己的任务/线程，
+# 进程和 UI 还活着，错误走 SharedState.error 显示——「闪退」最伤的就是
+# 完全没有现场。配合 lib.rs 的 panic hook，panic 会落盘 crash.log。
+# 代价是二进制略大 + LTO 略慢，音频 app 稳定性优先。
+panic = "unwind"
+strip = true

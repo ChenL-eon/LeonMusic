@@ -1,0 +1,7 @@
+<!--
+  追加到 Tauri 生成的 app/src/main/AndroidManifest.xml 的 <application> 内。
+-->
+<service
+    android:name=".PlaybackService"
+    android:exported="false"
+    android:foregroundServiceType="mediaPlayback" />

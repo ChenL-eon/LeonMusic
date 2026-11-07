@@ -1,0 +1,35 @@
+{
+  "id": "emby",
+  "name": "Emby",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "接入自建 Emby 媒体服务器。使用 API Key 鉴权，直连你的服务器。",
+  "author": "LeonMusic",
+  "main": "index.js",
+  "capabilities": ["search", "stream"],
+  "config": [
+    {
+      "key": "baseUrl",
+      "label": "服务器地址",
+      "fieldType": "string",
+      "default": "",
+      "required": true,
+      "placeholder": "http://192.168.1.10:8096/emby"
+    },
+    {
+      "key": "apiKey",
+      "label": "API Key",
+      "fieldType": "password",
+      "default": "",
+      "required": true,
+      "placeholder": "在 Emby 控制台 → 高级 → API 密钥 中创建"
+    },
+    {
+      "key": "userId",
+      "label": "用户 ID（可选）",
+      "fieldType": "string",
+      "default": "",
+      "placeholder": "填写后只搜索该用户可见的媒体"
+    }
+  ]
+}

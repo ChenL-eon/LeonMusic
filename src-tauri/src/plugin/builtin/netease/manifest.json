@@ -1,0 +1,68 @@
+{
+  "id": "netease",
+  "name": "网易云音乐",
+  "version": "2.12.0",
+  "api": 1,
+  "description": "内置网易云 web 端接口（weapi/eapi），开箱即用，无需自建服务。匿名可搜索、取歌词、看个性推荐歌单；登录支持扫码、短信验证码（手机号与验证码只发往网易官方服务器）与 Cookie 三种方式，登录后可用账号权限内的完整曲目与音质，首页有每日推荐，账号页可一键导入云端歌单与「我喜欢的音乐」。登录后播放会自动打卡同步：满 30 秒的真实播放上报网易云（计入最近播放 / 听歌排行 / 听歌时长，10–30 分钟后可见），可在下方关闭。扫码登录可能被网易云账号级风控拦截（手机提示「设备环境异常」），此时可用验证码或 Cookie 登录。官方只给 30 秒试听时，默认尝试第三方解析取完整直链（解析音质跟随所选档位，无损档可拿到 FLAC），解析按后端链自动轮换（GD 音乐台 → 咪咕直链 → 酷我直链 → bilibili DASH → 自建 Meting，前一个限流或宕机自动换下一个；咪咕链免登录、国内直连最稳，无损档可升 FLAC），可在下方关闭。音质档位在「设置 → 播放 → 在线音质」选择，实际规格以播放条显示为准（官方可能静默降级，不确保有效）。仅供个人学习与技术研究，请遵守当地版权法规。",
+  "author": "LeonMusic",
+  "main": "index.js",
+  "capabilities": ["search", "stream", "lyric", "login", "playlist"],
+  "config": [
+    {
+      "key": "level",
+      "label": "在线音质（设置 → 播放 里选择）",
+      "fieldType": "string",
+      "default": "exhigh",
+      "required": false,
+      "placeholder": "standard / higher / exhigh / lossless 由「设置 → 播放 → 在线音质」写入；官方会静默降级无损及以上，hires/jymaster 当前链路不保证"
+    },
+    {
+      "key": "unblock",
+      "label": "受限歌曲解析（第三方服务）",
+      "fieldType": "boolean",
+      "default": "on",
+      "required": false,
+      "placeholder": "官方只给 30 秒试听时，尝试从第三方解析服务取网易云 CDN 的完整直链"
+    },
+    {
+      "key": "unblockQuality",
+      "label": "解析音质",
+      "fieldType": "string",
+      "default": "320",
+      "required": false,
+      "placeholder": "留空或 128 / 192 / 320 / 999；选音质档位时自动同步，999 实测对 VIP 曲会下发 FLAC 16bit/44.1kHz"
+    },
+    {
+      "key": "unblockBackends",
+      "label": "解析后端链（高级）",
+      "fieldType": "string",
+      "default": "",
+      "required": false,
+      "placeholder": "留空 = GD 音乐台 → 咪咕直链 → 酷我直链 → bilibili DASH + 下方 Meting 地址（若已填）自动轮换；由「设置 → 播放 → 解析播放源」开关与排序生成，填 off 关闭全部解析。也可手写逗号序列：gd / migu / kw / bili 与 meting:地址，如 gd,migu,kw,bili,meting:https://my.server/meting；前一个失败自动换下一个，全部失败回落官方试听"
+    },
+    {
+      "key": "scrobble",
+      "label": "听歌打卡（同步听歌记录到网易云）",
+      "fieldType": "boolean",
+      "default": "on",
+      "required": false,
+      "placeholder": "登录后，满 30 秒的真实播放自动上报网易云：计入最近播放 / 听歌排行 / 听歌时长（10–30 分钟延迟）。只报真实听过的歌，不会刷榜"
+    },
+    {
+      "key": "cookie",
+      "label": "登录 Cookie（扫码成功会自动填写）",
+      "fieldType": "password",
+      "default": "",
+      "required": false,
+      "placeholder": "扫码被风控时：浏览器登录 music.163.com → F12 → Network → 任一请求的 Request Headers → 复制整段 Cookie（必须含 MUSIC_U），粘到「用 Cookie 登录」"
+    },
+    {
+      "key": "baseUrl",
+      "label": "Meting 地址（可选后备）",
+      "fieldType": "string",
+      "default": "",
+      "required": false,
+      "placeholder": "留空使用内置接口；填写则改走自建 Meting"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the LeonMusic main window and desktop lyric window",
+  "windows": ["main", "lyric"],
+  "permissions": [
+    "core:default",
+    "core:app:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-close",
+    "core:webview:default",
+    "dialog:default",
+    "os:default"
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "name": "leonmusic",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "LeonMusic - a Rust-core music player built with Tauri v2 + Vue 3",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:only": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build --apk",
+    "android:build:aab": "tauri android build --aab",
+    "icon": "tauri icon scripts/app-icon.png"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tauri-apps/plugin-os": "^2.0.0",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.0",
+    "vite": "^7.0.0",
+    "vue-tsc": "^3.0.0"
+  }
+}
