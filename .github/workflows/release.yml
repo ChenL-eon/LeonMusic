@@ -154,3 +154,5 @@ jobs:
         with:
           files: dist-rel/*
           fail_on_unmatched_files: true
+          # tag 名含 "-"（如 v1.0.2-beta）自动标记为预发布版
+          prerelease: ${{ contains(github.ref_name, '-') }}
