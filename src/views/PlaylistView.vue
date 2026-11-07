@@ -8,11 +8,13 @@ import TrackList from "@/components/TrackList.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
 import type { Track } from "@/types";
 
 const library = useLibraryStore();
 const player = usePlayerStore();
 const ui = useUiStore();
+const settings = useSettingsStore();
 
 const creating = ref(false);
 const newName = ref("");
@@ -91,6 +93,7 @@ async function addQueue(t: Track) {
           :tracks="tracks"
           :current-id="player.snap.track?.id"
           :favorite-ids="library.favoriteIds"
+        :click-play="settings.isAndroid"
           empty-text="歌单还是空的，去本地音乐右键添加"
           @play="play"
           @favorite="(t) => library.toggleFavorite(t.id)"

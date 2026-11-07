@@ -8,11 +8,13 @@ import TrackList from "@/components/TrackList.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
+import { useSettingsStore } from "@/stores/settings";
 import type { Track } from "@/types";
 
 const library = useLibraryStore();
 const player = usePlayerStore();
 const ui = useUiStore();
+const settings = useSettingsStore();
 
 const keyword = ref("");
 const sortBy = ref<"title" | "artist" | "album" | "added">("artist");
@@ -119,6 +121,7 @@ function remove(t: Track) {
         :tracks="sorted"
         :current-id="player.snap.track?.id"
         :favorite-ids="library.favoriteIds"
+        :click-play="settings.isAndroid"
         empty-text="点右上角「添加文件夹」，选一个音乐目录开始"
         @play="play"
         @favorite="fav"

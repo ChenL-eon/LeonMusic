@@ -53,6 +53,29 @@ const playerOpen = ref(false);
 const searchKeyword = ref("");
 const searchKey = ref(0);
 
+/** 应用内导航栈：记录每个「前进」动作发生时的页面快照，
+ *  返回（返回按钮 / 安卓侧滑手势）逐级弹出，实现「回到上一个页面」。 */
+type NavEntry = { page: Page; list: ListKind | null; searchKey?: number; searchKeyword?: string };
+const navStack = ref<NavEntry[]>([]);
+
+function pushNav(extra?: Partial<NavEntry>) {
+  navStack.value.push({ page: ui.page, list: listKind.value, ...extra });
+}
+
+/** 安卓系统返回（全面屏侧滑 / 返回键）由 WryActivity 转发给 WebView 的
+ *  history.goBack()；SPA 没有历史条目时它会直接结束 Activity（现象=回到桌面）。
+ *  预压一条占位历史，popstate 里改走应用内返回，再补一条占位——
+ *  返回手势永远只消费 WebView 历史，应用本身永不退出。 */
+function onSysBack() {
+  if (playerOpen.value) {
+    playerOpen.value = false;
+  } else if (isSub.value) {
+    back();
+  }
+  // 一级页：吞掉返回（不退出应用）
+  history.pushState({ mguard: true }, "");
+}
+
 /** ui store 的默认页是桌面的 'now'。初始化阶段碰到它只回首页，
  *  不能当成「运行期跳转播放页」，否则移动端一启动就弹出全屏播放层。 */
 let bootstrapped = false;
@@ -61,6 +84,8 @@ onMounted(() => {
     ui.go("home");
   }
   bootstrapped = true;
+  history.pushState({ mguard: true }, "");
+  window.addEventListener("popstate", onSysBack);
 });
 
 /** 桌面视图里少数地方会调 ui.go('now')（播放后跳播放页）。
@@ -111,29 +136,45 @@ const listTracks = computed(() =>
 );
 
 function openSearch(keyword?: string) {
+  pushNav({ searchKey: searchKey.value, searchKeyword: searchKeyword.value });
   searchKeyword.value = keyword ?? "";
   searchKey.value += 1;
   ui.go("search");
 }
 
 function openSub(page: Page) {
+  pushNav();
   listKind.value = null;
   ui.go(page);
 }
 
 function openList(kind: ListKind) {
+  pushNav();
   listKind.value = kind;
 }
 
 function back() {
-  listKind.value = null;
-  ui.go(lastTab.value);
+  const prev = navStack.value.pop();
+  if (prev) {
+    listKind.value = prev.list;
+    if (prev.page === "search") {
+      // 恢复进入搜索页前的关键字与挂载 key（key 变化强制 MobileSearch 重建还原）
+      searchKeyword.value = prev.searchKeyword ?? "";
+      searchKey.value = prev.searchKey ?? searchKey.value;
+    }
+    if (ui.page !== prev.page) ui.go(prev.page);
+  } else {
+    // 没有栈记录的兜底：回当前分区一级页
+    listKind.value = null;
+    ui.go(lastTab.value);
+  }
 }
 
-function navigate(tab: MobileTab) {
+function navigate(tab: MobileTab, record = true) {
   if (tab === "favorites") {
     favoritesReturn.value = primaryTab.value === "me" ? "me" : "home";
   }
+  if (record) pushNav();
   listKind.value = null;
   ui.go(tab);
 }
@@ -168,7 +209,7 @@ function navigate(tab: MobileTab) {
             v-else-if="primaryTab === 'search'"
             :key="'search' + searchKey"
             :initial-keyword="searchKeyword"
-            @back="navigate('home')"
+            @back="back"
           />
           <MobileListPage
             v-else-if="primaryTab === 'favorites'"
@@ -176,7 +217,7 @@ function navigate(tab: MobileTab) {
             title="我喜欢的"
             :tracks="library.favorites"
             empty-text="还没有喜欢的歌曲"
-            @back="navigate(favoritesReturn)"
+            @back="back"
           />
           <MobileMe
             v-else

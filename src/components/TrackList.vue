@@ -1,5 +1,8 @@
 <script setup lang="ts">
-/** 曲目列表。双击播放，hover 出现操作按钮。 */
+/**
+ * 曲目列表。桌面双击播放、hover 出现操作按钮；
+ * `click-play`（安卓触摸端）改为单击播放——触摸上双击反直觉。
+ */
 import { computed } from "vue";
 
 import CoverArt from "@/components/CoverArt.vue";
@@ -14,8 +17,10 @@ const props = withDefaults(
     showCover?: boolean;
     showIndex?: boolean;
     emptyText?: string;
+    /** 单击整行即播放（安卓移动端二级页用），桌面默认仍为双击 */
+    clickPlay?: boolean;
   }>(),
-  { currentId: null, showCover: true, showIndex: true, emptyText: "这里还没有歌曲" },
+  { currentId: null, showCover: true, showIndex: true, emptyText: "这里还没有歌曲", clickPlay: false },
 );
 
 const emit = defineEmits<{
@@ -39,6 +44,10 @@ function fmt(ms: number): string {
 function isFav(t: Track) {
   return props.favoriteIds?.has(t.id) ?? false;
 }
+
+function onRowClick(t: Track, i: number) {
+  if (props.clickPlay) emit("play", t, i);
+}
 </script>
 
 <template>
@@ -53,6 +62,7 @@ function isFav(t: Track) {
       :key="t.id + i"
       class="row"
       :class="{ playing: t.id === currentId }"
+      @click="onRowClick(t, i)"
       @dblclick="emit('play', t, i)"
     >
       <div v-if="showIndex" class="idx mono">

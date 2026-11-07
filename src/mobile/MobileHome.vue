@@ -71,10 +71,27 @@ const sectionTitle = computed(() => {
   return remoteTracks.value.length ? "每日推荐" : "为你推荐";
 });
 
-const tileA = computed(() => library.favorites[0] ?? library.recent[0] ?? library.tracks[0] ?? null);
-const tileB = computed(
-  () => library.tracks[library.tracks.length - 1] ?? library.recent[1] ?? tileA.value,
+/** 双封面卡：登录态下优先用每日推荐的云封面（coverUrl 可直接显示）；
+ *  本地库歌曲的封面可能没扫描出来（coverPath 为空），只在未登录时兜底。 */
+const tileA = computed(
+  () => remoteTracks.value[0] ?? library.favorites[0] ?? library.recent[0] ?? library.tracks[0] ?? null,
 );
+const tileB = computed(
+  () =>
+    remoteTracks.value[1] ??
+    library.tracks[library.tracks.length - 1] ??
+    library.recent[1] ??
+    tileA.value,
+);
+
+const tileASub = computed(() =>
+  remoteTracks.value.length
+    ? "今日推荐"
+    : library.favorites.length
+      ? `${library.favorites.length} 首收藏`
+      : "从收藏开始",
+);
+const tileBSub = computed(() => (remoteTracks.value.length ? "每日推荐" : "本地曲库"));
 
 function playAll(list: Track[]) {
   if (!list.length) {
@@ -134,7 +151,7 @@ function more(t: Track) {
         <span class="veil" />
         <span class="txt">
           <b>猜你喜欢</b>
-          <small>{{ library.favorites.length ? `${library.favorites.length} 首收藏` : "从收藏开始" }}</small>
+          <small>{{ tileASub }}</small>
         </span>
         <span class="play"><Icon name="play" :size="16" filled /></span>
       </button>
@@ -150,7 +167,7 @@ function more(t: Track) {
         <span class="veil" />
         <span class="txt">
           <b>新碟上架</b>
-          <small>本地曲库</small>
+          <small>{{ tileBSub }}</small>
         </span>
         <span class="play"><Icon name="play" :size="16" filled /></span>
       </button>
