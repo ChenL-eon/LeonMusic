@@ -1,0 +1,156 @@
+# LeonMusic 发版流水线
+#
+# 触发：
+#   - 推送 v* 标签  → 构建桌面双包 + 安卓 APK，并发布到该标签的 GitHub Release
+#   - 手动触发（workflow_dispatch）→ 只构建验证，不发版（release 任务自动跳过）
+#
+# 前提（仓库 Secrets，由一次性脚本写入，服务端加密不可回读）：
+#   LEONMUSIC_JKS_B64    —— android-overlay/leonmusic-release.jks 的 base64
+#   LEONMUSIC_STORE_PASS —— jks storePassword
+#   LEONMUSIC_KEY_ALIAS  —— jks keyAlias
+#   LEONMUSIC_KEY_PASS   —— jks keyPassword
+#
+# 安卓工程说明：src-tauri/gen/android/ 是生成物（.gitignore 排除），CI 里
+# 用 `tauri android init` + `android-overlay/apply.py` 重建，签名文件在跑
+# apply.py 之前解密还原到 android-overlay/，注入机制与本地完全一致。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ---------------------------------------------------------------- 桌面端
+  desktop:
+    name: Windows 安装包 + 便携版
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 构建桌面端（NSIS + exe）
+        run: npm run tauri build
+
+      - name: 归集产物
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force dist-rel | Out-Null
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/LeonMusic_*_x64-setup.exe" | Select-Object -First 1
+          Copy-Item $setup.FullName "dist-rel/LeonMusic-$v-windows-x64-setup.exe"
+          Compress-Archive -Path "src-tauri/target/release/LeonMusic.exe" -DestinationPath "dist-rel/LeonMusic-$v-windows-x64-portable.zip" -Force
+          Get-ChildItem dist-rel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop
+          path: dist-rel/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- 安卓端
+  android:
+    name: Android arm64 APK（正式签名）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 定位 NDK
+        run: echo "NDK_HOME=$(ls -d "$ANDROID_HOME"/ndk/* | tail -1)" >> "$GITHUB_ENV"
+
+      - name: 重建安卓工程（init + overlay）
+        run: |
+          npx tauri android init
+          python3 android-overlay/apply.py
+
+      - name: 还原正式签名（来自 Secrets）
+        run: |
+          echo "$LEONMUSIC_JKS_B64" | base64 -d > android-overlay/leonmusic-release.jks
+          cat > android-overlay/keystore.properties <<EOF
+          storeFile=leonmusic-release.jks
+          storePassword=$LEONMUSIC_STORE_PASS
+          keyAlias=$LEONMUSIC_KEY_ALIAS
+          keyPassword=$LEONMUSIC_KEY_PASS
+          EOF
+          python3 android-overlay/apply.py   # 第二次跑：这次会注入签名配置
+        env:
+          LEONMUSIC_JKS_B64: ${{ secrets.LEONMUSIC_JKS_B64 }}
+          LEONMUSIC_STORE_PASS: ${{ secrets.LEONMUSIC_STORE_PASS }}
+          LEONMUSIC_KEY_ALIAS: ${{ secrets.LEONMUSIC_KEY_ALIAS }}
+          LEONMUSIC_KEY_PASS: ${{ secrets.LEONMUSIC_KEY_PASS }}
+
+      - name: 构建 APK
+        run: npx tauri android build --apk --target aarch64
+
+      - name: 归集产物
+        run: |
+          v=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          mkdir -p dist-rel
+          cp src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+             "dist-rel/LeonMusic-$v-android-arm64.apk"
+          ls -la dist-rel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist-rel/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- 发版
+  release:
+    name: 发布 GitHub Release
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-rel
+          merge-multiple: true
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-rel/*
+          fail_on_unmatched_files: true
