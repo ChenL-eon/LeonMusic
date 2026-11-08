@@ -937,6 +937,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 
 | 检查项 | 命令 | 结果 |
 |---|---|---|
+| Android 1.0.8 APK（智能音质 + 移动端设置） | 移走旧 APK 后 `npx tauri android build --apk --target aarch64` | ✅ `E://Test//LeonMusic-1.0.8-android-arm64.apk`，22,665,919 B，sha256 `df45ac97af518fcb88fd15facafb785f5b3365c54184f1052ab949b51b259701`；`versionName=1.0.8` / `native-code='arm64-v8a'`；720 条目、`testzip()` 通过、EOCD 落在文件末尾（尾部 22 B）、APK v2 签名块存在，证书 `ebb3bdb8…a3c133` 与 1.0.7 一致可覆盖安装；`dist/index.html` 引用的 4 个资源名全部命中 `.so` 内嵌字符串 |
 | Rust 编译（Windows） | `cargo check --lib` | ✅ 0 warning |
 | Rust 编译（Android arm64） | `cargo check --lib --target aarch64-linux-android` | ✅ 0 warning |
 | Rust 单测 | `cargo test --lib` | ✅ 29 passed（另有 3 个联网用例默认 `#[ignore]`） |
