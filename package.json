@@ -1,7 +1,7 @@
 {
   "name": "leonmusic",
   "private": true,
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "description": "LeonMusic - a Rust-core music player built with Tauri v2 + Vue 3",
   "scripts": {

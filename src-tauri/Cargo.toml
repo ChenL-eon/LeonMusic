@@ -1,6 +1,6 @@
 [package]
 name = "leonmusic"
-version = "1.0.3"
+version = "1.0.4"
 description = "LeonMusic - Rust-core music player (Tauri v2)"
 authors = ["Leon"]
 edition = "2021"

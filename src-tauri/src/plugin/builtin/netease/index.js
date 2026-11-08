@@ -248,19 +248,35 @@ function artistNames(list) {
 // 免费曲这几项分别是 null / 0 / 320000，所以判定不需要靠解码时长去猜。
 //
 // 这里不尝试绕过权限，而是把「取一条完整直链」交给三个第三方源，按顺序
-// 轮换（见下方「咪咕音源」「补位音源」区块）：咪咕免登录、国内直连最稳；
-// 拿不到时用酷我 BD（可出 FLAC）与 GD 音乐台（网易曲库）兜底。
+// 轮换（见下方「咪咕音源」「补位音源」区块）：酷我 BD 命中率与规格最高，
+// 排第一；咪咕免登录、国内直连最稳，补酷我无版权的歌；GD 音乐台用网易
+// 曲库兜底。低规格结果不提前收工，会继续问下一个源（见 resolveTrack）。
 // 三个源全部失败，就老实回落官方试听（前端会提示只有 30 秒）。
 /** 空配置 = 开启；只有显式写 off / 0 / false 才关闭 */
 function unblockOn() {
   var v = (leon.config.get('unblock') || '').toLowerCase();
   return v !== 'off' && v !== '0' && v !== 'false';
 }
-/** 统一解析入口：官方试听不够用时，按「咪咕 → 酷我 BD → GD」依次取完整直链。 */
+/** 各源返回的规格是否已达到用户档位。
+ *  br 是归一化值：900 = 无损（实际 800–2000k），320 / 128 = MP3。
+ *  咪咕对部分曲目只给 128k/320k，这时不该挡住后面的无损源。 */
+function qualityEnough(actualBr, wantBr) {
+  var need = Number(wantBr) === 999 ? 900 : Number(wantBr) || 128;
+  return (Number(actualBr) || 0) >= need;
+}
+
+/** 统一解析入口。
+ *  2026-11-08 实测 12 首真实曲库（无损档）：酷我命中 10/12 且全为无损、
+ *  平均 1.00s；咪咕命中 9/12、只有 7 首无损、平均 1.06s；GD 5/12、
+ *  平均 1.91s。故酷我排第一，咪咕补它无版权的歌（如《海阔天空》），
+ *  GD 兜底（独有 24bit 曲目，但常 503）。
+ *  命中低规格时不收工：咪咕给 128k/320k 的《Dear God》《郭源潮》在旧
+ *  「先命中先返回」下会挡住酷我的 FLAC，这里记下最好的继续问。 */
 function resolveTrack(track) {
   if (!unblockOn()) return null;
   var br = unblockBr();
-  var backends = [miguResolve, bodianResolve, gdResolve];
+  var backends = [bodianResolve, miguResolve, gdResolve];
+  var best = null;
   for (var i = 0; i < backends.length; i++) {
     var r = null;
     try {
@@ -268,9 +284,11 @@ function resolveTrack(track) {
     } catch (e) {
       r = null; // 单个后端的任何异常都不能影响其它后端
     }
-    if (r && r.url) return r;
+    if (!r || !r.url) continue;
+    if (qualityEnough(r.br, br)) return r;
+    if (!best || (Number(r.br) || 0) > (Number(best.br) || 0)) best = r;
   }
-  return null;
+  return best;
 }
 /** 去掉括号里的 (Live) / (翻唱) 备注、空白和标点，用于同名比对 */
 function normalizeName(s) {
@@ -521,15 +539,19 @@ function miguResolve(track, br) {
 // 补位音源：酷我 BD（bodian）与 GD 音乐台
 // ---------------------------------------------------------------------------
 //
-// 咪咕搜不到、或只拿到试听时的兜底。两源 2026-11-08 全链路实测：
+// 2026-11-08 用 12 首真实曲库曲目（无损档）逐个单源实测：
+//   bodian 命中 10/12、全部无损、平均 1.00s；
+//   migu   命中  9/12、其中 7 首无损、平均 1.06s；
+//   gd     命中  5/12、平均 1.91s（最长 4.0s，常 503）。
+// 所以 bodian 领头、migu 补缺、gd 兜底（见 resolveTrack）。细节：
 //   bodian —— 酷我 BD 接口。先打一次「广告免单」拿解锁位，再用
 //             md5(kuwotest + 排序后的查询串 + path) 签名换直链。
-//             br=2000kflac 能拿真 FLAC（晴天 55MB / 稻香 26MB），
-//             命中率最高；注意直链 token 短命（几分钟后 403），
-//             取到必须立刻播，不能缓存进队列等下一首。
+//             br=2000kflac 能拿真 FLAC（晴天 55MB / 稻香 26MB / We Are The
+//             World 91MB 的 24bit），命中率最高。直链实测 5 分钟后仍 206，
+//             取到即播即可，但不要长期缓存。
 //   gd     —— GD 音乐台（与 VutronMusic 的 pyncmd 同源），用**网易曲库
-//             ID** 直接换直链，补 bodian 拿不到的网易独家；限流 503
-//             频繁，失败后冷却 10 分钟，避免每首歌都白等一次超时。
+//             ID** 直接换直链，补 bodian 拿不到的网易独家（《迷恋》24bit
+//             80MB 只有它有）；限流 503 频繁，失败后冷却 10 分钟。
 // 酷我 antiserver 故意没接：与 bodian 同曲库，且 VIP 曲只下发固定
 // 181521 字节（30 秒试听），接进来属于「假成功」，比没有更糟。
 
@@ -595,11 +617,27 @@ function kuwoSearch(query) {
 }
 
 /** 歌名+歌手严格匹配（复用咪咕那套 gdCandidateMatches），并优先选时长对得上的候选：
- *  酷我同一首歌常同时有「15 秒片段」「Live」「未定义」等条目，只按名字取会挑中片段。 */
+ *  酷我同一首歌常同时有「15 秒片段」「Live」「未定义」等条目，只按名字取会挑中片段。
+ *  搜索走的是 bd-api 同域，服务挂了每首都会白等一次 4s 超时——这里冷却 2 分钟。 */
 function kuwoMatch(track) {
-  var hit = pickKuwo(track, kuwoSearch(String(track.title || '') + ' ' + String(track.artist || '')));
+  var list = null;
+  try {
+    list = kuwoSearch(String(track.title || '') + ' ' + String(track.artist || ''));
+  } catch (e) {
+    bodianCooldownUntil = Date.now() + 2 * 60 * 1000;
+    return null;
+  }
+  var hit = pickKuwo(track, list);
   if (hit) return hit;
-  if (track.title) return pickKuwo(track, kuwoSearch(track.title));
+  if (track.title) {
+    try {
+      list = kuwoSearch(track.title);
+    } catch (e) {
+      bodianCooldownUntil = Date.now() + 2 * 60 * 1000;
+      return null;
+    }
+    return pickKuwo(track, list);
+  }
   return null;
 }
 

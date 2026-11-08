@@ -971,6 +971,8 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             "bodianResolve",
             "gdResolve",
             "kuwoMatch",
+            // 2.19.0：低规格不收工，按档位判断是否继续问下一个源
+            "qualityEnough",
             // 2.14.0：红心 / 排行榜 / 私人FM / 相似歌曲
             "likeTrack",
             "isLikedTrack",
@@ -1615,8 +1617,8 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             stream["bitrate"].as_u64()
         );
         assert_eq!(stream["source"].as_str(), Some("resolved"));
-        // 解析链是 gd → migu → kw → kg → bili 逐个尝试：GD 限流时咪咕/酷狗
-        // 接住是设计行为（直链来自哪家 CDN 取决于谁先成功），不能写死域名。
+        // 解析链是 bodian → migu → gd 逐个尝试，且低规格不收工：直链来自哪家
+        // CDN 取决于谁先给到档位要求的规格，不能写死域名。
         // 「全曲」由下面的 Content-Range 长度判定。
         assert!(url.starts_with("http"), "解析直链异常: {url}");
         assert_ne!(url, trial, "解析结果和官方试听是同一条，等于没生效");
