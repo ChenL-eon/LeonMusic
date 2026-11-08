@@ -36,6 +36,7 @@ const DEFAULTS: Settings = {
   dlColorTrans: "#ffffff",
   dlAlwaysOnTop: true,
   streamEnabled: false,
+  smartQuality: true,
   cacheLimitMb: 2048,
   crossfadeMs: 0,
 };

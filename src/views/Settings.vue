@@ -595,7 +595,9 @@ function goDownload() {
             </div>
           </div>
 
-          <div class="row">
+          <!-- 主色只影响桌面端的界面强调色；安卓端跟随系统 / 固定主题，
+               不提供选择（移动端设计上不要一堆彩色圆点占半屏） -->
+          <div v-if="!store.isAndroid" class="row">
             <div class="label">
               <div>主色</div>
               <div class="desc">影响按钮、歌词高亮、进度条</div>
@@ -859,6 +861,26 @@ function goDownload() {
 
         <!-- 播放 -->
         <section v-else-if="tab === 'play'" class="group">
+          <!-- 智能音质：解析 / 开播失败时逐档降级重试（默认开启）。
+               开关只是策略开关，真正的降级链在 Rust 侧 resolve_and_play。 -->
+          <div class="row">
+            <div class="label with-icon">
+              <span class="row-icon"><Icon name="sparkle" :size="19" filled /></span>
+              <div>
+                <div>智能音质</div>
+                <div class="desc">播放失败时自动降级音质重试</div>
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="s.smartQuality"
+                @change="set('smartQuality', ($event.target as HTMLInputElement).checked)"
+              />
+              <span />
+            </label>
+          </div>
+
           <div class="row">
             <div class="label">
               <div>输出采样率</div>
@@ -1538,6 +1560,24 @@ function goDownload() {
   font-size: 13.5px;
   font-weight: 500;
 }
+/* 带前置图标的设置行（智能音质等）：图标与标题同排，说明仍在标题下方。
+   图标那一路把文字包进了内层 div，所以标题样式要补一条同款。 */
+.label.with-icon {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+.row-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--accent);
+  line-height: 0;
+}
+.label.with-icon > div > div:first-child {
+  font-size: 13.5px;
+  font-weight: 500;
+}
 .desc {
   font-size: 11.5px;
   color: var(--text-3);
@@ -2060,6 +2100,35 @@ input[type="range"]::-webkit-slider-thumb {
     width: 30px;
     height: 30px;
   }
+  /* 数字步进框：桌面是紧凑的 inline 控件，整行摊开后数字缩在左边、
+     右侧空出一大片，看着像没填完的表单。手机上改成「值靠左、箭头贴右」，
+     并把点击区放大到手指能稳稳点中的尺寸。 */
+  .num-field {
+    width: 100%;
+    height: 44px;
+    padding: 0 8px 0 14px;
+  }
+  .num-field input {
+    flex: 1;
+    width: auto;
+    text-align: left;
+    font-size: 16px;
+  }
+  .steppers {
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border);
+  }
+  .steppers button {
+    width: 36px;
+    height: 30px;
+  }
+  .steppers svg {
+    width: 10px;
+    height: 6px;
+  }
   input[type="range"] {
     width: 100%;
     height: 5px;
@@ -2106,6 +2175,32 @@ input[type="range"]::-webkit-slider-thumb {
   }
   .switch {
     align-self: center;
+  }
+  /* 横屏又回到「标题在左、控件在右」，步进框跟着收回紧凑样式 */
+  .num-field {
+    width: auto;
+    height: 36px;
+    padding: 0 6px 0 12px;
+  }
+  .num-field input {
+    flex: none;
+    width: 54px;
+    text-align: right;
+    font-size: 14px;
+  }
+  .steppers {
+    flex-direction: column;
+    gap: 1px;
+    padding-left: 0;
+    border-left: 0;
+  }
+  .steppers button {
+    width: 20px;
+    height: 15px;
+  }
+  .steppers svg {
+    width: 8px;
+    height: 5px;
   }
 }
 

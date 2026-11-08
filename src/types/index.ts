@@ -31,6 +31,8 @@ export interface Track {
   sampleRate?: number | null;
   channels?: number | null;
   addedAt: number;
+  /** 本次解析实际请求的档位（智能音质降级重试时由 Rust 填入，普通播放不出现） */
+  qualityHint?: string;
 }
 
 /** 插件实际下发的音质（不是用户选的档位）。官方接口常静默降级。 */
@@ -289,6 +291,8 @@ export interface Settings {
   dlAlwaysOnTop: boolean;
   /** 「流媒体」板块总开关：默认关闭，关闭时隐藏配置并停用三个自建服务插件 */
   streamEnabled: boolean;
+  /** 智能音质：播放失败时自动降一级音质重试，默认开启 */
+  smartQuality: boolean;
   cacheLimitMb: number;
   crossfadeMs: number;
 }
