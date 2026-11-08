@@ -155,7 +155,9 @@ pub fn run() {
             // Session::open 遇到 stream_url 时从这里取（OnceLock，setup 只设一次）。
             state::set_stream_deps(state::StreamDeps {
                 cache: app.state::<AppState>().cache.clone(),
-                blocking: Arc::new(crate::net::BlockingHttp::new()),
+                // 与插件解析共用一份客户端：插件那条 Range 探测已经把 CDN
+                // 连接建好，起播时直接复用，省掉一次 TLS 握手。
+                blocking: crate::net::BlockingHttp::shared(),
                 db: app.state::<AppState>().db.clone(),
             });
 

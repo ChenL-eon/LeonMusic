@@ -159,6 +159,17 @@ impl Default for BlockingHttp {
 }
 
 impl BlockingHttp {
+    /// 进程级共享实例。
+    ///
+    /// 插件解析和流式下载以前各自 `new()` 一次，每次调用结束就丢掉连接池，
+    /// 于是每首歌都要重新做 TLS 握手（实测冷连接首请求 208ms，复用 25ms）。
+    /// 共享一份后，第二个请求起直接走已建立的连接；插件里那发 Range 探测
+    /// 还能顺手把播放要用的 CDN 连接预热。
+    pub fn shared() -> &'static BlockingHttp {
+        static SHARED: std::sync::OnceLock<BlockingHttp> = std::sync::OnceLock::new();
+        SHARED.get_or_init(BlockingHttp::new)
+    }
+
     pub fn new() -> Self {
         let build = |no_proxy: bool| -> reqwest::blocking::Client {
             let mut b = reqwest::blocking::Client::builder()

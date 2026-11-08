@@ -40,7 +40,8 @@ pub static ENGINE: OnceLock<Arc<AudioEngine>> = OnceLock::new();
 /// 三个能力，不背整个 AppState。
 pub struct StreamDeps {
     pub cache: Arc<MediaCache>,
-    pub blocking: Arc<BlockingHttp>,
+    /// 进程级共享客户端（与插件解析同一份连接池）。
+    pub blocking: &'static BlockingHttp,
     pub db: Arc<Db>,
 }
 

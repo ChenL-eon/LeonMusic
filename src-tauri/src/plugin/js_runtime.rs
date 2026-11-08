@@ -18,9 +18,10 @@ const LOOP_LIMIT: u64 = 20_000_000;
 /// 单次执行的递归/栈深度上限
 const RECURSION_LIMIT: usize = 400;
 
+/// 进程级共享的 HTTP 客户端，见 [`BlockingHttp::shared`]。
 struct HostState {
     config: HashMap<String, String>,
-    http: BlockingHttp,
+    http: &'static BlockingHttp,
 }
 
 thread_local! {
@@ -48,7 +49,7 @@ pub fn call_function(
     HOST.with(|h| {
         *h.borrow_mut() = Some(HostState {
             config: config.clone(),
-            http: BlockingHttp::new(),
+            http: BlockingHttp::shared(),
         });
     });
 
@@ -513,10 +514,12 @@ fn host_http_get_ex(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsR
             return Err("host not ready".to_string());
         };
         // 首页只是用来收集 Cookie，不能让它拖慢「点扫码 → 出二维码」：
-        // 客户端默认 20s，这里单独压到 8s，超时就退化成无预热会话。
+        // 流式客户端没有 client 级总超时，这里按请求压到 8s，超时就退化成无预热会话。
         let mut req = state
             .http
-            .client_for(&url)
+            // 走流式客户端：插件的 Range 探测打的就是马上要播放的那个 CDN，
+            // 用同一份连接池，起播时不必再握一次手。
+            .stream_client_for(&url)
             .get(&url)
             .timeout(std::time::Duration::from_secs(8));
         if let Some(map) = req_headers.as_object() {
