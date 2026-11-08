@@ -54,7 +54,7 @@ async function pickFolder() {
   }
 }
 
-function play(t: Track, i: number) {
+function play(_t: Track, i: number) {
   void player.playList(sorted.value, i);
 }
 

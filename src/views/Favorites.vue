@@ -17,7 +17,7 @@ const { favorites } = storeToRefs(library);
 
 onMounted(() => void library.init());
 
-function play(t: Track, i: number) {
+function play(_t: Track, i: number) {
   void player.playList(favorites.value, i);
 }
 

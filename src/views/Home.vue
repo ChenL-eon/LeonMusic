@@ -122,7 +122,7 @@ function clearSearch() {
   }
 }
 
-function playResult(t: Track, i: number) {
+function playResult(_t: Track, i: number) {
   playTracks(results.value, i);
 }
 

@@ -102,7 +102,7 @@ async function loadMore() {
   await search(false);
 }
 
-async function play(t: Track, i: number) {
+async function play(_t: Track, i: number) {
   ui.toast("正在解析播放地址…");
   // 搜索结果还没入库，走对象路径；id 查询只对本地库有效
   await player.playTracks(results.value, i);

@@ -589,7 +589,7 @@ impl Session {
             return DecodeSource::open(&p);
         }
 
-        let pending = deps.cache.begin_stream(url, &deps.blocking)?;
+        let pending = deps.cache.begin_stream(url, deps.blocking)?;
         let source = DecodeSource::open_stream(pending.stream, url)?;
 
         // 回填：下载线程 EOF（缓存就位）→ 更新 tracks.file_path + 内存队列。

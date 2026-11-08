@@ -578,14 +578,6 @@ impl OpusSource {
         self.base_ms + (self.frames_out as f64 / 48_000.0 * 1000.0) as u64
     }
 
-    /// 补上时长（由扫描阶段从 lofty 读到的结果回填）。
-    pub fn with_duration(mut self, duration_ms: u64) -> Self {
-        if self.duration_ms == 0 {
-            self.duration_ms = duration_ms;
-        }
-        self
-    }
-
     pub fn path(&self) -> &Path {
         &self.path
     }

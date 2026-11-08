@@ -67,7 +67,6 @@ export const usePlayerStore = defineStore("player", () => {
   const queue = ref<QueueSnapshot>({ items: [], current: null, repeat: "all", shuffle: false });
   const lyrics = ref<Lyrics>(emptyLyrics());
   const platform = ref<PlatformInfo | null>(null);
-  const buffering = ref<{ trackId: string; downloaded: number; total: number } | null>(null);
   const ready = ref(false);
   /** 上一次已经提示过的错误文本，避免 ticker 每 120ms 重复弹同一条。 */
   let lastError = "";
@@ -271,15 +270,6 @@ export const usePlayerStore = defineStore("player", () => {
       await on<QueueSnapshot>(EVT.queue, (payload) => {
         queue.value = payload;
       }),
-      await on<{ trackId: string }>(EVT.buffering, (payload) => {
-        buffering.value = { trackId: payload.trackId, downloaded: 0, total: 0 };
-      }),
-      await on<{ trackId: string; downloaded: number; total: number }>(
-        EVT.bufferProgress,
-        (payload) => {
-          buffering.value = payload;
-        },
-      ),
     );
 
     void loadLyrics();
@@ -398,7 +388,6 @@ export const usePlayerStore = defineStore("player", () => {
     queue,
     lyrics,
     platform,
-    buffering,
     ready,
     displayPosition,
     track,
