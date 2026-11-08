@@ -30,4 +30,7 @@ Thumbs.db
 *.log
 
 # ---- 本地调试工作台（探针脚本、截图、构建日志，不入库）----
-build/
+# 用 `build/**` 而不是 `build/`：整体排除目录后 git 不再下探，
+# 下面那条例外就失效了。解析链单测是唯一需要长期保留的资产。
+build/**
+!build/test_resolve_chain.cjs
