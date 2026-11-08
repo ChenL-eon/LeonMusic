@@ -158,6 +158,13 @@ impl Seek for HttpStream {
         let avail_end = st.base + st.buf.len() as u64;
         if new >= st.base && new < avail_end {
             // 已缓冲区间内 → 直接用
+        } else if st.len == Some(new) {
+            // seek 恰好到 EOF 位置：symphonia 探测 fMP4 遇「延伸到文件尾的
+            // box」（size=0 的 mdat）会 seek 到 End(0) = len。这不该触发
+            // 网络重连——`Range: bytes={len}-` 在 RFC 7233 下起点越界，B 站
+            // CDN 按标准回 416 Range Not Satisfiable，probe 直接失败
+            // （2026-11-08 用户真实日志）。就地标记 EOF，读端立即得 Ok(0)。
+            st.eof = true;
         } else {
             // 区间外（moov 回跳 / 拖进度条 / eof 后回 seek）→ 重开 Range 连接
             st.restart = Some(new);
@@ -302,6 +309,23 @@ fn run_download(
             st.restart.take()
         };
         if let Some(n) = want {
+            // 越界 restart 防御：len=None 窗口（首连完成前）的 seek 不会被
+            // 读端钳位，这里补一道——n >= len 的语义就是 EOF，发
+            // `Range: bytes={n}-` 必被 CDN 回 416（RFC 7233）。
+            let clamped = {
+                let mut st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                match st.len {
+                    Some(len) if n >= len => {
+                        st.pos = len;
+                        st.eof = true;
+                        None
+                    }
+                    _ => Some(n),
+                }
+            };
+            let Some(n) = clamped else {
+                continue; // 已按 EOF 处理，无需重连
+            };
             let _ = resp.take(); // 锁外丢弃旧连接
             tracing::info!("stream reconnect at byte {n} for {url}");
             if let Some(f) = file.as_mut() {
@@ -934,6 +958,93 @@ mod tests {
         drop(s);
         drop(pending.done);
         drop(server);
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&fin);
+    }
+
+    /// ⑤ 复现 B 站 CDN 416（2026-11-08 用户真实日志）：symphonia 探测 fMP4
+    ///    遇「延伸到文件尾的 box」（size=0 的 mdat）会 seek 到 End(0) = len；
+    ///    旧逻辑把「seek 恰好到 EOF 位置」也当区间外回跳，发
+    ///    `Range: bytes={len}-` 重连，B 站按 RFC 7233 回 416 Range Not
+    ///    Satisfiable → probe failed。seek 到 EOF 是合法操作，应就地 EOF。
+    ///    需真实 B 站 m4s URL：环境变量 BILI_416_URL（node 探针生成）。
+    #[test]
+    #[ignore]
+    fn stream_seek_to_end_416_live() {
+        let url = std::env::var("BILI_416_URL").unwrap_or_else(|_| {
+            let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../build/bili_test_url.txt");
+            std::fs::read_to_string(p)
+                .expect("build/bili_test_url.txt (run probe_bili_416.cjs first)")
+                .trim()
+                .to_string()
+        });
+        let (tmp, fin) = scratch("bili416");
+        let client = crate::net::client::BlockingHttp::new();
+        let pending = spawn_download(
+            url.clone(),
+            client.stream_client_for(&url).clone(),
+            Some("https://www.bilibili.com/"),
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+
+        // 等 Content-Length 就位（首次连接完成）
+        let mut len = None;
+        for _ in 0..50 {
+            if let Some(n) = pending.stream.byte_len() {
+                len = Some(n);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let len = len.expect("Content-Length known after first connection");
+        println!("[416] len={len}");
+
+        let mut s = pending.stream.clone();
+        // symphonia 遇 size=0 box 的行为：seek 到文件末尾
+        let pos = s.seek(std::io::SeekFrom::End(0)).unwrap();
+        assert_eq!(pos, len);
+        // 修复前：下载线程发 Range: bytes={len}- → CDN 416 → read Err
+        // 修复后：就地 EOF，read 返回 Ok(0)
+        let mut buf = [0u8; 1];
+        let r = s.read(&mut buf);
+        println!("[416] read at EOF -> {:?}", r.as_ref().map(|n| *n));
+        assert!(
+            matches!(r, Ok(0)),
+            "seek to EOF must yield clean EOF, got {r:?}"
+        );
+
+        drop(s);
+        drop(pending.done);
+
+        // 完整场景验证：symphonia probe 打开同款 B 站 fMP4 流（用户日志里
+        // 失败的那一步），修复后应正常探测并解出音频帧。
+        let pending2 = spawn_download(
+            url.clone(),
+            client.stream_client_for(&url).clone(),
+            Some("https://www.bilibili.com/"),
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+        let mut source = crate::audio::decoder::DecodeSource::open_stream(pending2.stream, &url)
+            .expect("probe must succeed on bilibili fMP4 stream");
+        let chunk = source
+            .next_chunk(1152)
+            .expect("decode after probe")
+            .expect("audio chunk");
+        println!(
+            "[416] probe ok: sr={} ch={} first_frame_samples={}",
+            source.sample_rate(),
+            source.channels(),
+            chunk.samples.len()
+        );
+        assert!(!chunk.samples.is_empty());
+        drop(source);
+        drop(pending2.done);
         let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(&fin);
     }
