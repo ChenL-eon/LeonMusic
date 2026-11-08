@@ -19,7 +19,7 @@ import { usePlayerStore } from "@/stores/player";
 import { useUiStore, type Page } from "@/stores/ui";
 import "@/mobile/mobile.css";
 
-defineProps<{ booting: boolean; bootError: string }>();
+defineProps<{ booting: boolean; showBoot: boolean; bootError: string }>();
 
 type MobileTab = "home" | "search" | "favorites" | "me";
 type ListKind = "recent" | "cached";
@@ -183,8 +183,10 @@ function navigate(tab: MobileTab, record = true) {
 <template>
   <div class="mobile-shell">
     <div v-if="booting" class="boot">
-      <div class="spinner" />
-      <div class="m-subtle">正在唤醒音频引擎…</div>
+      <template v-if="showBoot">
+        <div class="spinner" />
+        <div class="m-subtle">正在启动…</div>
+      </template>
     </div>
     <div v-else-if="bootError" class="boot">
       <div class="m-empty">

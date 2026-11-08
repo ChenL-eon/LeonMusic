@@ -19,6 +19,9 @@ export const useLibraryStore = defineStore("library", () => {
   const activePlaylist = ref<Playlist | null>(null);
   const playlistTracks = ref<Track[]>([]);
   const loading = ref(false);
+  /** 首次 refresh 完成（成功或失败）。启动时曲库不再阻塞首屏，
+   *  页面靠它区分「还没读到」和「真的没有歌」。 */
+  const ready = ref(false);
   const scanning = ref(false);
   const scanProgress = ref({ done: 0, total: 0 });
   const query = ref("");
@@ -37,11 +40,16 @@ export const useLibraryStore = defineStore("library", () => {
   const favoriteIds = computed(() => new Set(favorites.value.map((t) => t.id)));
 
   const unlisteners: UnlistenFn[] = [];
-  let initialized = false;
+  /** 并发兜底：启动时 App 与页面可能同时调用 init，共享同一个请求，
+   *  后来者等的是结果而不是被 `initialized` 提前打发走。 */
+  let initPromise: Promise<void> | null = null;
 
-  async function init() {
-    if (initialized) return;
-    initialized = true;
+  function init() {
+    if (!initPromise) initPromise = doInit();
+    return initPromise;
+  }
+
+  async function doInit() {
     await refresh();
     unlisteners.push(
       await on(EVT.libraryChanged, () => void refresh()),
@@ -69,6 +77,7 @@ export const useLibraryStore = defineStore("library", () => {
       }
     } finally {
       loading.value = false;
+      ready.value = true;
     }
   }
 
@@ -201,6 +210,7 @@ export const useLibraryStore = defineStore("library", () => {
     activePlaylist,
     playlistTracks,
     loading,
+    ready,
     scanning,
     scanProgress,
     query,

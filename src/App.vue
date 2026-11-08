@@ -29,6 +29,10 @@ const library = useLibraryStore();
 const settingsStore = useSettingsStore();
 
 const booting = ref(true);
+/** 遮罩内容延迟出现：初始化真的超过 150ms 才显示 spinner。
+ *  以前无条件显示，安卓冷启动时必然会明确闪一下这屏。 */
+const showBoot = ref(false);
+let bootTimer: ReturnType<typeof setTimeout> | undefined;
 const bootError = ref("");
 
 const views: Record<Page, unknown> = {
@@ -73,14 +77,22 @@ mobileQuery.addEventListener("change", onBreakpoint);
 onUnmounted(() => mobileQuery.removeEventListener("change", onBreakpoint));
 
 onMounted(async () => {
+  bootTimer = setTimeout(() => (showBoot.value = true), 150);
   try {
+    // 首屏只依赖「设置（主题/默认音源）」与「播放器状态（播放条）」。
     await settingsStore.init();
-    await library.init();
+    // 曲库是启动里最重的一步（最多 200 首 Track 要过 IPC），不再挡首屏：
+    // 与播放器并行，首页用 library.ready 自己显示骨架，数据到了直接填充。
+    library.init().catch((e) => {
+      console.error(e);
+      ui.toast(`读取曲库失败：${e}`, "error");
+    });
     await player.init();
   } catch (e) {
     bootError.value = String(e);
     console.error(e);
   } finally {
+    clearTimeout(bootTimer);
     booting.value = false;
   }
 });
@@ -97,7 +109,7 @@ async function toggleLyricWindow() {
 
 <template>
   <div class="app-root">
-    <MobileShell v-if="isMobile" :booting="booting" :boot-error="bootError" />
+    <MobileShell v-if="isMobile" :booting="booting" :show-boot="showBoot" :boot-error="bootError" />
 
     <div v-else class="shell">
       <TitleBar />
@@ -105,8 +117,10 @@ async function toggleLyricWindow() {
 
       <main class="main">
         <div v-if="booting" class="boot">
-          <div class="spinner" />
-          <div class="dim">正在唤醒音频引擎…</div>
+          <template v-if="showBoot">
+            <div class="spinner" />
+            <div class="dim">正在启动…</div>
+          </template>
         </div>
         <div v-else-if="bootError" class="boot">
           <div class="empty">

@@ -222,6 +222,15 @@ function more(t: Track) {
         @more="more"
       />
     </div>
+    <div v-else-if="!library.ready" class="rows sk">
+      <div v-for="i in 6" :key="i" class="sk-row">
+        <div class="sk-cover" />
+        <div class="sk-text">
+          <div class="sk-line" style="width: 62%" />
+          <div class="sk-line" style="width: 36%" />
+        </div>
+      </div>
+    </div>
     <div v-else class="m-empty">
       <Icon name="music" :size="34" />
       <div>还没有歌曲</div>
@@ -357,5 +366,39 @@ function more(t: Track) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+/* 曲库还在 IPC 路上时的占位：行高与真实曲目行一致，数据到了不跳动 */
+.sk-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* 与 MobileTrackRow 的 52px 封面 + 7px 纵向 padding 对齐：数据到了不跳 */
+  padding: 7px 2px;
+}
+.sk-cover {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  flex: none;
+  background: rgba(128, 128, 128, 0.16);
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+.sk-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sk-line {
+  height: 11px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.16);
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+@keyframes sk-pulse {
+  50% {
+    opacity: 0.45;
+  }
 }
 </style>
