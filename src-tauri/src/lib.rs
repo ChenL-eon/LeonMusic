@@ -167,7 +167,8 @@ pub fn run() {
             //
             // 引擎线程不能等网络，所以它发现「这首没有本地文件」时只发一个事件，
             // 由这里异步解析（拉流 → 落盘 → 写库），完成后再把 PlayTrack 发回去。
-            // 失败只写错误状态，不重试——重试会变成死循环。
+            // 智能音质开启时，解析 / 开播失败会在 `resolve_and_play` 里逐档降级，
+            // 降到最低档仍失败才把错误交给 UI，不会无限重试。
             {
                 let handle = app.handle().clone();
                 app.listen(events::EVT_RESOLVE_REQUEST, move |ev| {
@@ -179,13 +180,49 @@ pub fn run() {
                             return;
                         };
                         let id = track.id.clone();
-                        if let Err(e) = commands::resolve_and_play(&app, track).await {
+                        if let Err(e) = commands::resolve_and_play(&app, track, 0, true).await {
                             tracing::warn!("resolve online track {id} failed: {e}");
                             if let Some(st) = app.try_state::<AppState>() {
                                 // detail() 去掉 `plugin: ` 前缀，前端直接 toast 这句话
-                                st.engine
-                                    .shared()
-                                    .set_error(format!("在线曲目播放失败：{}", e.detail()));
+                                let shared = st.engine.shared();
+                                shared.set_error(format!("在线曲目播放失败：{}", e.detail()));
+                                // 只写 error 不切状态会永远停在 Buffering，播放键一直转圈
+                                shared.set_status(models::PlaybackStatus::Error);
+                            }
+                        }
+                    });
+                });
+            }
+
+            // 6.5 开播失败 → 降一档音质重试
+            //
+            // 引擎拿到直链却打不开（门户页 / 坏源 / 过期 CDN）时发这条事件，
+            // payload 的 `qualityHint` 已经是下一档；这里重新解析并起播。
+            {
+                let handle = app.handle().clone();
+                app.listen(events::EVT_PLAY_FAILED, move |ev| {
+                    let payload = ev.payload().to_string();
+                    let app = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let Ok(track) = serde_json::from_str::<models::Track>(&payload) else {
+                            tracing::warn!("bad play-failed payload");
+                            return;
+                        };
+                        tracing::info!(
+                            "playback failed for {}, retry at {:?}",
+                            track.id,
+                            track.quality_hint
+                        );
+                        let id = track.id.clone();
+                        if let Err(e) = commands::resolve_and_play(&app, track, 0, true).await {
+                            tracing::warn!("degraded retry for {id} failed: {e}");
+                            if let Some(st) = app.try_state::<AppState>() {
+                                let shared = st.engine.shared();
+                                shared.set_error(format!(
+                                    "在线曲目播放失败（已自动降级重试）：{}",
+                                    e.detail()
+                                ));
+                                shared.set_status(models::PlaybackStatus::Error);
                             }
                         }
                     });

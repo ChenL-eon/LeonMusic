@@ -25,6 +25,11 @@ pub const EVT_TRACK_ENDED: &str = "leon://player/track-ended";
 /// 为什么要在引擎外解析：解析要发 HTTP、要写文件，全是阻塞 IO；
 /// 而引擎线程必须保持 8ms 节拍，不能等网络。
 pub const EVT_RESOLVE_REQUEST: &str = "leon://player/resolve-request";
+/// 在线曲目开播失败，交给上层按「智能音质」降档重试。
+///
+/// payload = Track（`qualityHint` 已经是下一档）。引擎不自己做网络，
+/// 所以它只负责报告失败；真正的重解析在 `resolve_and_play` 里。
+pub const EVT_PLAY_FAILED: &str = "leon://player/play-failed";
 /// 设置已保存（payload = 完整 Settings）。
 ///
 /// 主窗口与桌面歌词窗各自持有独立的 Pinia 实例，任何一窗改设置

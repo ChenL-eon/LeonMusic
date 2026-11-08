@@ -49,6 +49,13 @@ pub struct Track {
     /// 不入库、不发给前端（`serde(skip)`）；落盘完成后由 file_path 接管。
     #[serde(skip)]
     pub stream_url: Option<String>,
+    /// 运行时字段：本次解析实际请求的音质档位。
+    ///
+    /// 只由「智能音质」降级重试填写，用户设置里存的是插件配置的 `level`。
+    /// 要跟着曲目一起穿过 resolve / play 事件，所以不能 `skip`——引擎开播
+    /// 失败时正是靠它知道下一次该再降哪一档。不入库。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_hint: Option<String>,
     /// 插件音源的原始 id。
     #[serde(default)]
     pub plugin_track_id: Option<String>,
@@ -110,6 +117,22 @@ pub struct StreamQuality {
     pub downgraded: bool,
     #[serde(default)]
     pub track_id: String,
+}
+
+/// 音质档位，由低到高。设置页的「在线音质」与「智能音质」降级共用这一份顺序。
+pub const QUALITY_LADDER: [&str; 6] = ["standard", "higher", "exhigh", "lossless", "hires", "jymaster"];
+
+/// 比 `current` 低一档的档位；已在最低档（或字符串不认识）时返回 `None`。
+///
+/// 降级重试只往低走：请求无损拿到的是 320k、或直链根本打不开时，
+/// 再往上试既没权限也没意义，只会多绕几次网络。
+pub fn lower_quality(current: &str) -> Option<&'static str> {
+    let i = QUALITY_LADDER.iter().position(|q| *q == current)?;
+    if i == 0 {
+        None
+    } else {
+        Some(QUALITY_LADDER[i - 1])
+    }
 }
 
 /// 引擎每次状态变更时推送的完整快照。
@@ -366,4 +389,50 @@ pub struct AudioDiag {
     pub buffered_samples: usize,
     pub device_error: Option<String>,
     pub hint: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_ladder_steps_down_and_stops_at_standard() {
+        // 降级链只往低走，最低档必须返回 None —— 否则引擎会一直重试
+        assert_eq!(lower_quality("lossless"), Some("exhigh"));
+        assert_eq!(lower_quality("exhigh"), Some("higher"));
+        assert_eq!(lower_quality("higher"), Some("standard"));
+        assert_eq!(lower_quality("standard"), None);
+        assert_eq!(lower_quality("unknown"), None);
+    }
+
+    #[test]
+    fn track_quality_hint_is_optional_on_the_wire() {
+        let t = Track {
+            id: "netease:1".into(),
+            source: TrackSource::Plugin {
+                plugin_id: "netease".into(),
+            },
+            title: "t".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: 0,
+            cover_path: None,
+            cover_url: None,
+            file_path: None,
+            stream_url: Some("https://example.com/a.flac".into()),
+            quality_hint: None,
+            plugin_track_id: Some("1".into()),
+            format: None,
+            bitrate: None,
+            sample_rate: None,
+            channels: None,
+            added_at: 0,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        // 直链不出进程、降级提示未设置时不占字段
+        assert!(!json.contains("streamUrl"));
+        assert!(!json.contains("qualityHint"));
+        let back: Track = serde_json::from_str(&json).unwrap();
+        assert!(back.quality_hint.is_none());
+    }
 }

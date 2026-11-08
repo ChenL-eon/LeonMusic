@@ -47,6 +47,17 @@ function levelFallback(want) {
   return LEVELS.slice(start);
 }
 
+/** 降级重试专用的档位顺序：从这一档开始**往低**问。
+ *  普通探测用 levelFallback 是逐档往上（服务端偶尔会给更高一档的完整曲），
+ *  但重试的意义是把码率压下来救回播放，再回头问更高档只会重蹈覆辙。 */
+function levelFallbackDown(want) {
+  var start = LEVELS.indexOf(want);
+  if (start < 0) start = LEVELS.indexOf('exhigh');
+  var out = [];
+  for (var k = start; k >= 0; k--) out.push(LEVELS[k]);
+  return out;
+}
+
 /** 只有「无损及以上」才值得向解析服务要 flac（br=999）。
  *  实测咪咕 h5v2.4 `br=999` 对 VIP 曲会下发真 FLAC（16bit/44.1kHz 全曲），
  *  `br=320` 则是 320k MP3；官方 eapi 的 lossless/hires/jymaster 会静默降成 320k。
@@ -58,6 +69,15 @@ function unblockBr() {
   if (want === 'lossless' || want === 'hires' || want === 'jymaster') return '999';
   if (want === 'higher') return '192';
   if (want === 'standard') return '128';
+  return '320';
+}
+
+/** 档位 → 解析请求码率。智能音质降级重试时用它覆盖 `unblockQuality`：
+ *  用户设置了 999，但这次是 320k 档在重试，就不该再要 FLAC 白等一轮。 */
+function brForLevel(level) {
+  if (level === 'lossless' || level === 'hires' || level === 'jymaster') return '999';
+  if (level === 'standard') return '128';
+  if (level === 'higher') return '192';
   return '320';
 }
 
@@ -272,9 +292,9 @@ function qualityEnough(actualBr, wantBr) {
  *  GD 兜底（独有 24bit 曲目，但常 503）。
  *  命中低规格时不收工：咪咕给 128k/320k 的《Dear God》《郭源潮》在旧
  *  「先命中先返回」下会挡住酷我的 FLAC，这里记下最好的继续问。 */
-function resolveTrack(track) {
+function resolveTrack(track, brOverride) {
   if (!unblockOn()) return null;
-  var br = unblockBr();
+  var br = brOverride || unblockBr();
   var backends = [bodianResolve, miguResolve, gdResolve];
   var best = null;
   for (var i = 0; i < backends.length; i++) {
@@ -841,8 +861,14 @@ function search(keyword, page, limit) {
 
 function getStreamUrl(track) {
   var want = leon.config.get('level') || 'exhigh';
-  var levels = levelFallback(want);
-  var wantsLossless = want === 'lossless' || want === 'hires' || want === 'jymaster';
+  // 智能音质降级：宿主重试时用 `qualityHint` 指定这一次实际请求的档位。
+  // `want` 仍是用户选的档位，只用于 requested / downgraded —— 选的是无损，
+  // 界面就该一直如实显示「无损未生效」，而不是悄悄变成 320k 却不解释。
+  var hint = track && track.qualityHint ? String(track.qualityHint) : '';
+  var attempt = hint || want;
+  var levels = hint ? levelFallbackDown(attempt) : levelFallback(attempt);
+  var attemptLossless = attempt === 'lossless' || attempt === 'hires' || attempt === 'jymaster';
+  var userWantsLossless = want === 'lossless' || want === 'hires' || want === 'jymaster';
 
   var lastCode = 0;
   var trial = null;
@@ -867,7 +893,7 @@ function getStreamUrl(track) {
       var meta = qualityFromOfficial(item, want, levels[k]);
       if (!isTrialUrlItem(item)) {
         // 免费曲 / 会员已解锁：直接返回，不打扰第三方服务。
-        if (!wantsLossless || meta.format === 'flac') return streamResult(item.url, meta);
+        if (!attemptLossless || meta.format === 'flac') return streamResult(item.url, meta);
         // 官方静默降级成 MP3：记下这条合法全曲，再去问第三方有没有 FLAC。
         // 已是「非试听」，继续降档问不会变好，直接跳出循环。
         if (!official) official = { url: item.url, meta: meta };
@@ -880,7 +906,8 @@ function getStreamUrl(track) {
 
   // 官方不给全曲、或只给 MP3 时解析；失败再退回官方全曲 / 试听
   if (unblockOn()) {
-    var resolved = resolveTrack(track);
+    // 降级重试时按这一次的档位要码率，不再沿用设置页里的 unblockQuality
+    var resolved = resolveTrack(track, hint ? brForLevel(attempt) : null);
     if (resolved && resolved.url) {
       var fmt = formatFromUrl(resolved.url);
       var resolvedBr = Number(resolved.br) || 0;
@@ -893,8 +920,8 @@ function getStreamUrl(track) {
           format: fmt,
           trial: false,
           requested: want,
-          // 请求无损档却只拿到 mp3，也算降级
-          downgraded: wantsLossless && fmt !== 'flac'
+          // 用户选的是无损、这一档却只拿到 mp3，仍算降级
+          downgraded: userWantsLossless && fmt !== 'flac'
         });
       }
     }

@@ -95,6 +95,7 @@ pub fn read_track(path: &Path) -> AppResult<ScannedTrack> {
         cover_url: None,
         file_path: Some(path.to_string_lossy().into_owned()),
         stream_url: None,
+        quality_hint: None,
         plugin_track_id: None,
         format: path
             .extension()

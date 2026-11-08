@@ -1017,6 +1017,26 @@ fn start_track(
         }
         Err(e) => {
             tracing::error!("play failed: {e}");
+            // 智能音质：直链打不开（门户页、坏源、过期的签名 CDN）时先降一档
+            // 重试，别急着把错误弹给用户。只对「本次走的是流式直链」的在线曲目
+            // 生效——缓存文件坏了跟码率无关，降档救不回来。
+            if track.stream_url.is_some() && track.file_path.is_none() {
+                if let Some(next) = crate::state::smart_next_level(app, &track) {
+                    tracing::info!(
+                        "retry {} at lower quality: {:?} -> {next}",
+                        track.id,
+                        track.quality_hint
+                    );
+                    let mut retry = track.clone();
+                    retry.quality_hint = Some(next.to_string());
+                    retry.stream_url = None;
+                    *shared.error.write() = None;
+                    shared.set_status(PlaybackStatus::Buffering);
+                    platform.update_playback_state(false);
+                    let _ = app.emit(events::EVT_PLAY_FAILED, &retry);
+                    return false;
+                }
+            }
             // 本地文件丢失是用户能理解的场景（移动/删除/U盘拔出），
             // 裸 io 错误码只会让人困惑，翻译成带歌名的可读提示。
             let msg = match &e {

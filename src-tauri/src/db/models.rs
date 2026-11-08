@@ -29,6 +29,7 @@ fn row_to_track(r: &Row<'_>) -> rusqlite::Result<Track> {
         cover_url: r.get("cover_url")?,
         file_path: r.get("file_path")?,
         stream_url: None,
+        quality_hint: None,
         plugin_track_id: r.get("plugin_track_id")?,
         format: r.get("format")?,
         bitrate: r.get::<_, Option<i64>>("bitrate")?.map(|v| v as u32),
@@ -727,6 +728,8 @@ pub struct Settings {
     pub dl_always_on_top: bool,
     /// 「流媒体」板块总开关：关闭时设置页收起配置，并停用 Emby/Jellyfin/Navidrome。
     pub stream_enabled: bool,
+    /// 智能音质：在线曲目开播 / 解析失败时自动降一档音质重试，默认开启。
+    pub smart_quality: bool,
     pub cache_limit_mb: u64,
     pub crossfade_ms: u32,
 }
@@ -759,6 +762,7 @@ impl Default for Settings {
             dl_color_trans: "#ffffff".into(),
             dl_always_on_top: true,
             stream_enabled: false,
+            smart_quality: true,
             cache_limit_mb: 2048,
             crossfade_ms: 0,
         }
@@ -803,6 +807,7 @@ mod tests {
             cover_url: None,
             file_path,
             stream_url: None,
+            quality_hint: None,
             plugin_track_id: None,
             format: None,
             bitrate: None,

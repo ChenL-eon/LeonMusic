@@ -59,6 +59,38 @@ pub fn set_engine(engine: Arc<AudioEngine>) {
     let _ = ENGINE.set(engine);
 }
 
+/// 「智能音质」：当前曲目还能再降一档吗？返回下一档档位。
+///
+/// 三个前提缺一不可：设置里开着、曲目来自插件音源、插件声明了 `level`
+/// 档位配置。降级只对「同一个 URL 换更低码率能救回来」的场景有意义，
+/// 本地文件打不开或插件根本不支持选档时不该参与重试。
+pub fn smart_next_level(app: &tauri::AppHandle, track: &Track) -> Option<&'static str> {
+    use tauri::Manager;
+
+    let st = app.try_state::<AppState>()?;
+    if !st.settings.read().smart_quality {
+        return None;
+    }
+    let plugin_id = track.source.plugin_id()?;
+    // 只有声明了 `level` 档位的插件才谈得上「降一档」；Emby 这类自建服务
+    // 的音质由服务端转码决定，重试同一个地址只会白等。
+    let info = st
+        .plugins
+        .list()
+        .into_iter()
+        .find(|p| p.manifest.id == plugin_id)?;
+    let field = info.manifest.config.iter().find(|f| f.key == "level")?;
+    // 用户没动过音质设置时配置是空对象，实际生效的是 manifest 的默认值
+    let base = info
+        .config
+        .get("level")
+        .or(field.default.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "exhigh".to_string());
+    let current = track.quality_hint.as_deref().unwrap_or(base.as_str());
+    crate::models::lower_quality(current)
+}
+
 /// 下一首预解析槽：当前曲目开始播放后，后台线程解析队列下一首的直链放进
 /// 这里；真正切歌时 `ensure_playable` 命中直接取用，解析等待 ≈ 0。
 /// 只存最近一个「下一首」——顺序播放是主场景，随机模式下命中率低属于正常退化。

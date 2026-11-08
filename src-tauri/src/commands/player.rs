@@ -201,37 +201,73 @@ pub fn player_play_tracks(app: AppHandle, tracks: Vec<Track>, start_index: Optio
 /// 播放单曲（本地直接播；在线音源先解析 + 缓存）。
 #[tauri::command]
 pub async fn player_play_track(app: AppHandle, track_id: String, start_ms: Option<u64>) -> AppResult<()> {
-    let mut track = {
+    let track = {
         let st = app.state::<AppState>();
         st.db
             .get_track(&track_id)?
             .ok_or_else(|| AppError::NotFound(format!("track {track_id}")))?
     };
 
-    ensure_playable(&app, &mut track).await?;
-
-    let st = app.state::<AppState>();
-    st.engine.send(EngineCommand::PlayTrack {
-        track,
-        start_ms: start_ms.unwrap_or(0),
-    });
-    preload_next(&app);
-    Ok(())
+    // 用户主动点播：这一步还没进引擎队列，不能拿队列当前项做「是否还在播这首」的判断
+    resolve_and_play(&app, track, start_ms.unwrap_or(0), false).await
 }
 
-/// 由 `EVT_RESOLVE_REQUEST` 触发：把在线曲目解析成本地文件后重新发起播放。
+/// 由 `EVT_RESOLVE_REQUEST` / `EVT_PLAY_FAILED` 触发：解析在线曲目并起播。
 ///
-/// 引擎只负责「发现没文件 → 发事件」，真正的网络与落盘在这里做，
-/// 这样音频线程永远不会被 HTTP 阻塞。
-pub(crate) async fn resolve_and_play(app: &AppHandle, mut track: Track) -> AppResult<()> {
-    ensure_playable(app, &mut track).await?;
-    let st = app.state::<AppState>();
-    st.engine.send(EngineCommand::PlayTrack {
-        track,
-        start_ms: 0,
-    });
-    preload_next(app);
-    Ok(())
+/// 「智能音质」开启时，解析报错会逐档往下降（lossless → exhigh → higher →
+/// standard）再试；某一档解析成功就交给引擎，引擎开播失败又会发
+/// `EVT_PLAY_FAILED` 回来，形成一条有上限的降级链（最低档为止）。
+/// 关掉这项设置时整条链退化成「只试一次」，与旧行为一致。
+pub(crate) async fn resolve_and_play(
+    app: &AppHandle,
+    mut track: Track,
+    start_ms: u64,
+    // `true`：这条解析是引擎回调触发的，期间用户可能已经切歌；
+    // 一旦队列当前项不是它，就放弃这次（重）解析，避免把用户拽回上一首。
+    only_if_current: bool,
+) -> AppResult<()> {
+    loop {
+        if only_if_current && !is_queue_current(app, &track.id) {
+            tracing::debug!("drop stale resolve for {} (user moved on)", track.id);
+            return Ok(());
+        }
+        match ensure_playable(app, &mut track).await {
+            Ok(()) => {
+                if only_if_current && !is_queue_current(app, &track.id) {
+                    tracing::debug!("drop stale play for {} (user moved on)", track.id);
+                    return Ok(());
+                }
+                let st = app.state::<AppState>();
+                st.engine.send(EngineCommand::PlayTrack { track, start_ms });
+                preload_next(app);
+                return Ok(());
+            }
+            Err(e) => {
+                let Some(next) = crate::state::smart_next_level(app, &track) else {
+                    return Err(e);
+                };
+                tracing::info!(
+                    "resolve fallback for {}: {:?} -> {next} ({e})",
+                    track.id,
+                    track.quality_hint
+                );
+                track.quality_hint = Some(next.to_string());
+                track.stream_url = None;
+                track.file_path = None;
+            }
+        }
+    }
+}
+
+/// 队列当前项是不是这首（只比 id，不看直链）。
+///
+/// 解析 / 降级重试都是异步的，用户完全可能在中途按了下一首；用队列
+/// 游标判断比 `current_track()` 可靠——后者在开播失败时还是上一首。
+fn is_queue_current(app: &AppHandle, track_id: &str) -> bool {
+    let q = app.state::<AppState>().engine.shared().queue_snapshot();
+    q.current
+        .and_then(|i| q.items.get(i))
+        .is_some_and(|t| t.id == track_id)
 }
 
 #[tauri::command]
@@ -404,9 +440,18 @@ async fn ensure_playable_ex(
 
     // 预解析槽命中：上一首播放时后台已把这首解析好了，直接取用，
     // 省掉整条解析链的网络等待。
+    //
+    // 降级重试（`quality_hint` 有值）时不能走这条快捷路：槽里存的是**原档位**
+    // 的直链，正是刚才打不开的那一条，直接复用等于白试一次。顺手把同曲目的
+    // 过期槽清掉，免得下一次正常播放又捡回坏链接。
     let hit = {
         let mut slot = crate::state::pre_resolved().lock();
-        if slot
+        if track.quality_hint.is_some() {
+            if slot.as_ref().is_some_and(|p| p.track.id == track.id) {
+                *slot = None;
+            }
+            None
+        } else if slot
             .as_ref()
             .is_some_and(|p| p.track.id == track.id && p.track.stream_url.is_some())
         {

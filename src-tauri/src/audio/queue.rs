@@ -252,6 +252,7 @@ mod tests {
             cover_url: None,
             file_path: None,
             stream_url: None,
+            quality_hint: None,
             plugin_track_id: None,
             format: None,
             bitrate: None,

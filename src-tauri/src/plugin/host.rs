@@ -699,6 +699,7 @@ fn remote_to_track(plugin_id: &str, r: RemoteTrack) -> Track {
         cover_url: r.cover_url,
         file_path: None,
         stream_url: None,
+        quality_hint: None,
         plugin_track_id: Some(r.id),
         format: None,
         bitrate: None,
@@ -716,6 +717,9 @@ fn track_to_json(t: &Track) -> serde_json::Value {
         "album": t.album,
         "durationMs": t.duration_ms,
         "coverUrl": t.cover_url,
+        // 智能音质降级重试时，宿主指定这一次实际请求的档位；
+        // 普通解析为 null，插件照旧读自己的 `level` 配置。
+        "qualityHint": t.quality_hint,
     })
 }
 
