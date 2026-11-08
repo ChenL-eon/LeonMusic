@@ -184,7 +184,7 @@ function onTouchEnd(e: TouchEvent) {
           <button class="ctrl" aria-label="上一首" @click="player.prev()">
             <Icon name="prev" :size="26" filled />
           </button>
-          <button class="ctrl main" :disabled="!player.canPlay" aria-label="播放或暂停" @click="player.toggle()">
+          <button class="ctrl primary" :disabled="!player.canPlay" aria-label="播放或暂停" @click="player.toggle()">
             <Icon :name="isPlaying ? 'pause-f' : 'play'" :size="30" filled />
           </button>
           <button class="ctrl" aria-label="下一首" @click="player.next()">
@@ -465,13 +465,16 @@ function onTouchEnd(e: TouchEvent) {
   place-items: center;
   width: 48px;
   height: 48px;
+  /* 显式清零：桌面窄窗时全局 .main 的 padding 曾把 .ctrl.main 的
+     内容区压偏，图标看起来往下掉 5px */
+  padding: 0;
   color: #fff;
   flex: none;
 }
 .ctrl.on {
   color: #a9c4ff;
 }
-.ctrl.main {
+.ctrl.primary {
   width: 62px;
   height: 62px;
   border-radius: 50%;
