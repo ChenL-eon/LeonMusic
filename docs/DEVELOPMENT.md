@@ -958,6 +958,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | Android 布局（竖屏 + 横屏，模拟器与真机） | 见下 | ✅ |
 | 移动端播放页标题对齐封面（本次） | `npm run build` + 无头 Chrome 390×844 + `build/mock_tauri.js` | ✅ 顶部歌名/歌手左边缘 = 大封面左边缘：390 / 360 / 412 / 320 四档实测 58.5 / 54 / 61.8 / 48 px 两组数值完全相同；封面宽与左偏移共用一个 `--cover-w`，改一处两边同步；封面下重复歌名改为两行歌词预览（左对齐同宽）；收起箭头去圆形底、心形/更多改描边圆；歌词分页复用同一左基线（`.line` left 58.5 = 标题 58.5）；长标题 `scrollWidth > clientWidth` 省略生效、右边缘 236 < 按钮左 246。截图 `build/tmp/mobile-player-*.png` |
 | 探测失败可读化（本次） | `cargo test --lib` + 本地 mock HTTP | ✅ 三种非音频响应的错误文案：HTML → 「音源返回的不是音频（网页/XML，Content-Type: text/html; charset=utf-8）：「<!DOCTYPE html>…」——链接可能已失效或需要登录」；JSON → 同类 JSON 结论；空体 → `probe failed …（来源没有返回任何数据）`。本地加密头（`CTENFDAM…`）→ 错误附 `文件开头字节 43 54 45 4e…`；0 字节 → `（文件是空的：0 字节）`。`HttpStream` 新增 `content_type()` / `sniff()`（不改读游标）；49 passed / 0 failed |
+| 坏缓存防护（本次） | `cargo test --lib` + 桌面缓存实扫 | ✅ 落盘前按魔数校验（ID3 / fLaC / OggS / RIFF / ftyp / MP3 帧同步 / ASF）：`.part` 大小等于 Content-Length 但内容不是音频时**只跳过缓存**，播放不受影响；打开缓存失败时只删除 media 缓存目录内的文件并清库记录，用户本地音乐不碰。测试：HTML 正文（长度精确匹配）不落盘且 `.part` 被清理、魔数表 flac/id3/帧同步/m4a/wav/html/json/空。桌面缓存目录现存 4 文件 154.9 MB 全为音频，无历史坏文件。51 passed / 0 failed |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
 （普通 / 多时间标签 / 逐字 / 偏移 / 同时间戳译文合并）、文件名解析、
