@@ -357,9 +357,9 @@ fn run_download(
     let mut file: Option<std::fs::File> = None;
     let mut resp: Option<reqwest::blocking::Response> = None;
     let mut connected = false;
-    /// EOF 已处理完（落盘/放弃缓存的决策已做）。线程转入驻留：不再主动
-    /// 下载，只等读端 seek（EOF 后拖回/重播）触发 restart 重开 Range 连接。
-    /// 旧版 EOF 后直接 return，restart 无人处理 → 读端永久卡死。
+    // EOF 已处理完（落盘/放弃缓存的决策已做）。线程转入驻留：不再主动
+    // 下载，只等读端 seek（EOF 后拖回/重播）触发 restart 重开 Range 连接。
+    // 旧版 EOF 后直接 return，restart 无人处理 → 读端永久卡死。
     let mut parked = false;
 
     loop {
