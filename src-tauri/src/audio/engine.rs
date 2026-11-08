@@ -522,7 +522,24 @@ struct Session {
 
 impl Session {
     fn open(track: &Track) -> AppResult<Self> {
-        let source = Self::open_source(track)?;
+        let source = match Self::open_source(track) {
+            Ok(s) => s,
+            Err(e) => {
+                // 缓存文件本身不是音频（旧版本曾把门户页/错误页当音频落盘），
+                // 删掉它让下次重播走在线解析，否则这首会永远「打开即失败」。
+                // 只动缓存目录内的文件，用户本地音乐不受影响。
+                if let Some(p) = track.file_path.as_deref() {
+                    if let Some(deps) = crate::state::stream_deps() {
+                        let path = Path::new(p);
+                        if deps.cache.owns(path) {
+                            tracing::warn!("discard unreadable cache {p}: {}", e.detail());
+                            deps.cache.discard(path);
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
         let src_rate = source.sample_rate();
         let channels = OUTPUT_CHANNELS as usize;
 

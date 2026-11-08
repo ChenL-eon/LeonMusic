@@ -23,7 +23,7 @@
 //!   catch_unwind 兜住并通知读端（panic=unwind 下线程死了不能让 read 永等）。
 
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -297,8 +297,42 @@ fn cancelled(inner: &Arc<Inner>) -> bool {
     Arc::strong_count(inner) <= 1
 }
 
-fn notify(inner: &Inner, err: Option<String>, eof: bool) {
+/// 落盘前的体检：只认音频容器魔数 / 帧同步。
+///
+/// 为什么必须做：`full`（.part 大小 == Content-Length）只证明「下载完整」。
+/// 手机连需要认证的 Wi-Fi 时，门户页会以 200 + HTML 返回，长度完全对得上，
+/// 旧逻辑就把它 rename 成 .mp3 缓存了——之后每次重播都直接打开这个 HTML，
+/// 永远复现 `probe failed: no suitable format reader found`。
+/// 判断失败只会「不缓存」，播放本身不受影响，宁可少缓存也不缓存垃圾。
+fn looks_like_audio(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 16];
+    let n = f.read(&mut head).unwrap_or(0);
+    if n < 4 {
+        return false;
+    }
+    let s = &head[..n];
+    if s.starts_with(b"ID3")
+        || s.starts_with(b"fLaC")
+        || s.starts_with(b"OggS")
+        || s.starts_with(b"RIFF")
+        || s.starts_with(b"FORM")
+        || s.starts_with(b"MAC ")
+        || s.starts_with(&[0x30, 0x26, 0xB2, 0x75]) // WMA / ASF GUID
     {
+        return true;
+    }
+    if n >= 8 && &s[4..8] == b"ftyp" {
+        return true; // M4A / MP4
+    }
+    // MP3 / ADTS AAC：11 位帧同步全 1
+    s[0] == 0xFF && s[1] & 0xE0 == 0xE0
+}
+
+fn notify(inner: &Inner, err: Option<String>, eof: bool) {    {
         let mut st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
         if err.is_some() {
             st.err = err;
@@ -500,12 +534,20 @@ fn run_download(
                     && std::fs::metadata(&tmp_path)
                         .map(|m| m.len() == len.unwrap())
                         .unwrap_or(false);
+                // 完整 ≠ 是音频：门户页/错误页长度也能对上，落盘就是永久坏缓存
+                let audio = full && looks_like_audio(&tmp_path);
+                if full && !audio {
+                    tracing::warn!(
+                        "stream body is not audio ({} bytes), skip cache for {url}",
+                        len.unwrap_or(0)
+                    );
+                }
                 if let Some(f) = file.as_mut() {
                     use std::io::Write as _;
                     let _ = f.flush();
                 }
                 drop(file.take());
-                if full {
+                if audio {
                     tracing::info!("stream finalized {} -> {} for {url}", len.unwrap(), final_path.display());
                     if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
                         let msg = format!("finalize cache: {e}");
@@ -522,13 +564,19 @@ fn run_download(
                     }
                     let _ = tx.send(Ok(final_path.clone()));
                 } else {
-                    // 重连过 / 长度未知：不缓存（下次重播再流式），播放不受影响
+                    // 重连过 / 长度未知 / 内容不是音频：不缓存（下次重播再流式），
+                    // 播放本身不受影响
+                    let msg = if full {
+                        "stream body is not audio, not cached"
+                    } else {
+                        "stream not fully buffered, not cached"
+                    };
                     let _ = std::fs::remove_file(&tmp_path);
                     notify(&inner, None, true);
                     if let Some(f) = on_finish.take() {
-                        f(Err(AppError::net("stream not fully buffered, not cached")));
+                        f(Err(AppError::net(msg)));
                     }
-                    let _ = tx.send(Err(AppError::net("stream not fully buffered, not cached")));
+                    let _ = tx.send(Err(AppError::net(msg)));
                 }
                 // EOF 处理完毕 → 驻留而非退出：读端仍可能 seek 回头
                 // （重播、拖进度条），restart 必须有人处理。
@@ -1154,6 +1202,69 @@ mod tests {
             drop(server);
             let _ = std::fs::remove_file(&tmp);
             let _ = std::fs::remove_file(&fin);
+        }
+    }
+
+    /// ⑦ 完整但非音频的响应（典型：手机连认证 Wi-Fi 时运营商门户页）
+    ///    绝不能落盘成缓存，否则这首以后每次重播都直接打开 HTML。
+    #[test]
+    fn html_body_is_never_cached() {
+        let body = b"<!DOCTYPE html><html><body>captive portal</body></html>".to_vec();
+        let (url, server) = spawn_mock_with_type(body.clone(), Some("text/html"));
+        let (tmp, fin) = scratch("portal");
+        let client = crate::net::client::BlockingHttp::new();
+        let pending = spawn_download(
+            url.clone(),
+            client.stream_client_for(&url).clone(),
+            None,
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+
+        let mut s = pending.stream;
+        let mut sink = vec![0u8; 4096];
+        let mut got = 0usize;
+        loop {
+            let n = s.read(&mut sink).unwrap();
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        assert_eq!(got, body.len(), "reader must see the whole body");
+        let r = pending
+            .done
+            .recv_timeout(Duration::from_secs(3))
+            .expect("finalize decision");
+        println!("[portal] {r:?}");
+        assert!(r.is_err(), "html body must not be cached: {r:?}");
+        assert!(!fin.exists(), "html body became a cache file");
+        assert!(!tmp.exists(), ".part was not cleaned up");
+        drop(s);
+        drop(server);
+    }
+
+    /// ⑧ 魔数判定本身：常见容器都要认，网页 / JSON / 空文件必须拒
+    #[test]
+    fn audio_magic_detection() {
+        let cases: Vec<(&str, Vec<u8>, bool)> = vec![
+            ("flac", b"fLaC\0\0\0\x22".to_vec(), true),
+            ("mp3-id3", b"ID3\x04\x00\x00".to_vec(), true),
+            ("mp3-sync", vec![0xFF, 0xFB, 0x90, 0x64], true),
+            ("m4a", b"\0\0\0\x20ftypM4A ".to_vec(), true),
+            ("wav", b"RIFF\x24\x08\0\0WAVE".to_vec(), true),
+            ("html", b"<!DOCTYPE html><html>".to_vec(), false),
+            ("json", br#"{"error":"x"}"#.to_vec(), false),
+            ("empty", Vec::new(), false),
+        ];
+        let dir = std::env::temp_dir();
+        for (name, bytes, want) in cases {
+            let p = dir.join(format!("lm-magic-{name}-{}.bin", std::process::id()));
+            std::fs::write(&p, &bytes).unwrap();
+            assert_eq!(looks_like_audio(&p), want, "{name}");
+            let _ = std::fs::remove_file(&p);
         }
     }
 }

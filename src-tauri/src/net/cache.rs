@@ -168,6 +168,25 @@ impl MediaCache {
         )
     }
 
+    /// 该路径是否是本缓存目录的产物。清理坏缓存前必须先过这一关——
+    /// 用户自己的本地音乐绝不能因为「解码失败」被删。
+    pub fn owns(&self, path: &Path) -> bool {
+        path.parent().map(|p| p == self.dir).unwrap_or(false)
+    }
+
+    /// 丢弃一个坏缓存：删文件 + 删库记录（文件名就是 URL 的 sha256，即 key）。
+    pub fn discard(&self, path: &Path) {
+        let key = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let _ = std::fs::remove_file(path);
+        if !key.is_empty() {
+            let _ = self.db.drop_cache(&key);
+        }
+    }
+
     /// 查询某 URL 是否已有完整本地缓存（存在性校验通过）。
     pub fn cached_path(&self, url: &str) -> AppResult<Option<PathBuf>> {
         let key = Self::key_for(url);
