@@ -247,22 +247,30 @@ function artistNames(list) {
 //   freeTrialInfo: { start: 0, end: 30 }，time: 30040，br: 128012
 // 免费曲这几项分别是 null / 0 / 320000，所以判定不需要靠解码时长去猜。
 //
-// 这里不尝试绕过权限，而是把「取一条完整直链」交给咪咕（见下方咪咕音源
-// 区块）：免登录、国内直连最稳、自家 CDN 不限长，无损档可升 FLAC。
-// 关掉开关、或咪咕搜不到这首歌，都老实回落官方试听（前端会提示只有 30 秒）。
+// 这里不尝试绕过权限，而是把「取一条完整直链」交给三个第三方源，按顺序
+// 轮换（见下方「咪咕音源」「补位音源」区块）：咪咕免登录、国内直连最稳；
+// 拿不到时用酷我 BD（可出 FLAC）与 GD 音乐台（网易曲库）兜底。
+// 三个源全部失败，就老实回落官方试听（前端会提示只有 30 秒）。
 /** 空配置 = 开启；只有显式写 off / 0 / false 才关闭 */
 function unblockOn() {
   var v = (leon.config.get('unblock') || '').toLowerCase();
   return v !== 'off' && v !== '0' && v !== 'false';
 }
-/** 统一解析入口：官方试听不够用时，从咪咕拿完整直链。 */
+/** 统一解析入口：官方试听不够用时，按「咪咕 → 酷我 BD → GD」依次取完整直链。 */
 function resolveTrack(track) {
   if (!unblockOn()) return null;
-  try {
-    return miguResolve(track, unblockBr());
-  } catch (e) {
-    return null; // 任何异常都不能影响官方试听回落
+  var br = unblockBr();
+  var backends = [miguResolve, bodianResolve, gdResolve];
+  for (var i = 0; i < backends.length; i++) {
+    var r = null;
+    try {
+      r = backends[i](track, br);
+    } catch (e) {
+      r = null; // 单个后端的任何异常都不能影响其它后端
+    }
+    if (r && r.url) return r;
   }
+  return null;
 }
 /** 去掉括号里的 (Live) / (翻唱) 备注、空白和标点，用于同名比对 */
 function normalizeName(s) {
@@ -344,7 +352,7 @@ function isTrialUrlItem(item) {
 }
 
 // ---------------------------------------------------------------------------
-// 咪咕音源（内置解析后端，唯一第三方源）
+// 咪咕音源（主解析后端，链头）
 // ---------------------------------------------------------------------------
 //
 // 2026-11-07 全链路实测复活：此前判「咪咕已死」只对老接口 scr_search_tag
@@ -507,6 +515,254 @@ function miguResolve(track, br) {
     }
   }
   return { url: finalUrl, br: finalBr };
+}
+
+// ---------------------------------------------------------------------------
+// 补位音源：酷我 BD（bodian）与 GD 音乐台
+// ---------------------------------------------------------------------------
+//
+// 咪咕搜不到、或只拿到试听时的兜底。两源 2026-11-08 全链路实测：
+//   bodian —— 酷我 BD 接口。先打一次「广告免单」拿解锁位，再用
+//             md5(kuwotest + 排序后的查询串 + path) 签名换直链。
+//             br=2000kflac 能拿真 FLAC（晴天 55MB / 稻香 26MB），
+//             命中率最高；注意直链 token 短命（几分钟后 403），
+//             取到必须立刻播，不能缓存进队列等下一首。
+//   gd     —— GD 音乐台（与 VutronMusic 的 pyncmd 同源），用**网易曲库
+//             ID** 直接换直链，补 bodian 拿不到的网易独家；限流 503
+//             频繁，失败后冷却 10 分钟，避免每首歌都白等一次超时。
+// 酷我 antiserver 故意没接：与 bodian 同曲库，且 VIP 曲只下发固定
+// 181521 字节（30 秒试听），接进来属于「假成功」，比没有更糟。
+
+var KUWO_SEARCH_API =
+  'http://search.kuwo.cn/r.s?&correct=1&vipver=1&stype=comprehensive&encoding=utf8' +
+  '&rformat=json&mobi=1&show_copyright_off=1&searchapi=6&all=';
+var BODIAN_AUDIO_API = 'http://bd-api.kuwo.cn/api/play/music/v2/audioUrl';
+var BODIAN_AD_API =
+  'http://bd-api.kuwo.cn/api/service/advert/watch?uid=-1&token=' +
+  '&timestamp=1724306124436&sign=15a676d66285117ad714e8c8371691da';
+var GD_API = 'https://music-api.gdstudio.xyz/api.php';
+
+var kuwoDeviceId = '';
+var bodianUnlocked = false;
+var bodianCooldownUntil = 0;
+var gdCooldownUntil = 0;
+
+/** 设备号：BD 接口按 devid 记解锁位，同一次会话复用即可 */
+function kuwoDevice() {
+  if (!kuwoDeviceId) {
+    kuwoDeviceId = String(Math.floor(Math.random() * 100000000000));
+  }
+  return kuwoDeviceId;
+}
+
+/** 搜索接口偶尔带 HTML 实体，解码后再参与匹配 */
+function decodeHtmlEntities(s) {
+  return String(s || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
+/** 酷我搜索（searchapi=6 免签名）：返回 [{id,name,artist,durationMs}] */
+function kuwoSearch(query) {
+  var q = String(query || '').replace(/\s+/g, ' ').trim();
+  if (!q) return [];
+  var body = leon.http.get(KUWO_SEARCH_API + encodeURIComponent(q), { timeoutMs: 4000 });
+  var json = null;
+  try {
+    json = JSON.parse(body);
+  } catch (e) {
+    return [];
+  }
+  var page = json && json.content && json.content[1] && json.content[1].musicpage;
+  var list = (page && page.abslist) || [];
+  var out = [];
+  for (var i = 0; i < list.length && out.length < 20; i++) {
+    var s = list[i];
+    if (!s || !s.SONGNAME || !s.MUSICRID) continue;
+    out.push({
+      id: String(s.MUSICRID).split('_').pop(),
+      name: decodeHtmlEntities(s.SONGNAME),
+      artist: decodeHtmlEntities(s.ARTIST),
+      durationMs: (Number(s.DURATION) || 0) * 1000,
+      album: decodeHtmlEntities(s.ALBUM)
+    });
+  }
+  return out;
+}
+
+/** 歌名+歌手严格匹配（复用咪咕那套 gdCandidateMatches），并优先选时长对得上的候选：
+ *  酷我同一首歌常同时有「15 秒片段」「Live」「未定义」等条目，只按名字取会挑中片段。 */
+function kuwoMatch(track) {
+  var hit = pickKuwo(track, kuwoSearch(String(track.title || '') + ' ' + String(track.artist || '')));
+  if (hit) return hit;
+  if (track.title) return pickKuwo(track, kuwoSearch(track.title));
+  return null;
+}
+
+function pickKuwo(track, list) {
+  var want = Number(track.durationMs) || 0;
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i];
+    if (!gdCandidateMatches(track, item)) continue;
+    var got = Number(item.durationMs) || 0;
+    // 时长信息缺失时只能信名字；有信息但差超过 20 秒 → 不是同一版本，宁缺毋滥
+    if (want > 0 && got > 0 && Math.abs(got - want) > 20000) continue;
+    return item;
+  }
+  return null;
+}
+
+/** Range 0-1 探测真实文件长度，反推时长是否够整曲（拦 30/60 秒试听片段）。
+ *  声明码率只是估算：FLAC 按 900k 估会比真实时长更长，不会误杀整曲。 */
+function audioLengthOk(url, br, wantMs) {
+  wantMs = Number(wantMs) || 0;
+  if (!wantMs) return true;
+  var res = null;
+  try {
+    res = leon.http.getEx(url, { Range: 'bytes=0-1' });
+  } catch (e) {
+    return true; // 探测失败不拦，宁可放行也别误杀整曲
+  }
+  var headers = (res && res.headers) || {};
+  var total = 0;
+  var m = /\/(\d+)\s*$/.exec(headers['content-range'] || '');
+  if (m) total = Number(m[1]);
+  else if (headers['content-length']) total = Number(headers['content-length']);
+  if (!total || !br) return true;
+  var seconds = (total * 8) / (br * 1000);
+  return seconds >= (wantMs / 1000) * 0.6;
+}
+
+/** bodian 签名：md5('kuwotest' + 排序后的查询字符 + path)，追加 timestamp */
+function bodianSign(url) {
+  var rest = url.substring(url.indexOf('//') + 2);
+  var pathname = rest.substring(rest.indexOf('/')).split('?')[0];
+  var signed = url + '&timestamp=' + Date.now();
+  var raw = signed.substring(signed.indexOf('?') + 1).replace(/[^a-zA-Z0-9]/g, '');
+  var digest = leon.md5('kuwotest' + raw.split('').sort().join('') + pathname);
+  return signed + '&sign=' + digest;
+}
+
+function bodianHeaders(extra) {
+  var h = {
+    'user-agent': 'Dart/2.19 (dart:io)',
+    plat: 'ar',
+    channel: 'aliopen',
+    ver: '3.9.0',
+    devid: kuwoDevice(),
+    'X-Forwarded-For': '1.0.1.114'
+  };
+  if (extra) {
+    for (var k in extra) {
+      if (Object.prototype.hasOwnProperty.call(extra, k)) h[k] = extra[k];
+    }
+  }
+  return h;
+}
+
+/** 「广告免单」：不打这一步，audioUrl 一律 code 20018「没有解锁付费歌曲」 */
+function bodianUnlock() {
+  if (bodianUnlocked) return true;
+  try {
+    var r = leon.http.postFormEx(
+      BODIAN_AD_API,
+      '{"type":5,"subType":5,"musicId":0,"adToken":""}',
+      bodianHeaders({
+        'content-type': 'application/json; charset=utf-8',
+        qimei36: '1e9970cbcdc20a031dee9f37100017e1840e'
+      })
+    );
+    var json = null;
+    try {
+      json = JSON.parse(r && r.body);
+    } catch (e) {
+      json = null;
+    }
+    bodianUnlocked = !!(json && json.code === 200);
+  } catch (e) {
+    // 服务不可达：冷却 5 分钟，别让每首歌都白等一次 20s 默认超时
+    bodianCooldownUntil = Date.now() + 5 * 60 * 1000;
+    bodianUnlocked = false;
+  }
+  return bodianUnlocked;
+}
+
+function bodianCall(url) {
+  var body = null;
+  try {
+    body = leon.http.get(bodianSign(url), { timeoutMs: 4500, headers: bodianHeaders() });
+  } catch (e) {
+    return null;
+  }
+  try {
+    return JSON.parse(body);
+  } catch (e) {
+    return null;
+  }
+}
+
+/** bodian 取链：2000kflac / 320kmp3 两档，解锁位失效时重打一次免单 */
+function bodianAudio(id, br) {
+  var quality = Number(br) >= 900 ? '2000kflac' : '320kmp3';
+  var url = BODIAN_AUDIO_API + '?&br=' + quality + '&musicId=' + id;
+  var json = bodianCall(url);
+  if (json && json.code === 20018 && bodianUnlocked) {
+    bodianUnlocked = false;
+    if (bodianUnlock()) json = bodianCall(url);
+  }
+  var audio = (json && json.data && json.data.audioUrl) || '';
+  return typeof audio === 'string' && audio.indexOf('http') === 0 ? audio : '';
+}
+
+function bodianResolve(track, br) {
+  if (Date.now() < bodianCooldownUntil) return null;
+  var hit = kuwoMatch(track);
+  if (!hit) return null;
+  if (!bodianUnlock()) return null;
+  var url = bodianAudio(hit.id, br);
+  if (!url) return null;
+  var path = url.split('?')[0].toLowerCase();
+  var declared = /\.flac$/.test(path) ? 900 : 320;
+  // 独家曲也可能只下发片段（实测 241KB ≈ 6s），长度不够就交给下一个后端
+  if (!audioLengthOk(url, declared, track.durationMs)) return null;
+  return { url: url, br: declared };
+}
+
+/** GD 音乐台：直接用网易 ID 换直链，限流时冷却 10 分钟 */
+function gdResolve(track, br) {
+  if (Date.now() < gdCooldownUntil) return null;
+  var id = String(track.id || '');
+  if (!/^\d+$/.test(id)) return null;
+  var quality = Number(br) >= 900 ? '999' : '320';
+  var url = GD_API + '?types=url&source=netease&id=' + id + '&br=' + quality;
+  var body = null;
+  try {
+    body = leon.http.get(url, { timeoutMs: 4000 });
+  } catch (e) {
+    body = null;
+  }
+  var json = null;
+  try {
+    json = JSON.parse(body);
+  } catch (e) {
+    // 503 / 维护页 → 冷却，链尾后端不该反复拖慢首播
+    gdCooldownUntil = Date.now() + 10 * 60 * 1000;
+    return null;
+  }
+  if (!json || !json.url || !json.br) return null;
+
+  var realBr = Number(json.br) || 0;
+  var size = Number(json.size) || 0;
+  var wantMs = Number(track.durationMs) || 0;
+  if (size > 0 && realBr > 0 && wantMs > 90000) {
+    var seconds = (size * 8) / (realBr * 1000);
+    if (seconds < (wantMs / 1000) * 0.5) return null; // 30 秒试听片段
+  }
+  return { url: json.url, br: realBr >= 900 ? 900 : realBr };
 }
 
 // ---------------------------------------------------------------------------

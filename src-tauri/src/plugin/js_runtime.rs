@@ -925,6 +925,10 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             "unblockOn",
             "isTrialUrlItem",
             "miguResolve",
+            // 2.18.0：补位解析后端（酷我 BD / GD）
+            "bodianResolve",
+            "gdResolve",
+            "kuwoMatch",
             // 2.14.0：红心 / 排行榜 / 私人FM / 相似歌曲
             "likeTrack",
             "isLikedTrack",
@@ -935,6 +939,31 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             let v = global.get(js_string!(name), &mut ctx).expect("lookup");
             assert!(v.is_callable(), "缺少入口函数 {name}");
         }
+    }
+
+    /// 2.18.0 补位后端：bodian 签名必须在 boa 里跑得通。
+    /// 这条同时锁住 Date.now / String.prototype.sort / leon.md5 三个依赖——
+    /// 任何一个在 JS 引擎里缺失，签名就是错的，接口会直接 20018。
+    #[test]
+    fn netease_bodian_sign_in_boa() {
+        let script = include_str!("builtin/netease/index.js");
+        let url = "http://bd-api.kuwo.cn/api/play/music/v2/audioUrl?&br=2000kflac&musicId=228908";
+        let v = call_function(script, "bodianSign", &[serde_json::json!(url)], HashMap::new())
+            .expect("bodianSign 执行失败");
+        let signed = v.as_str().expect("签名结果应是字符串");
+        assert!(signed.starts_with(url), "签名 URL 应以原 URL 开头: {signed}");
+        let sign = signed.rsplit("&sign=").next().unwrap_or_default();
+        assert_eq!(sign.len(), 32, "md5 应是 32 位 hex: {sign}");
+        assert!(sign.chars().all(|c| c.is_ascii_hexdigit()), "md5 非 hex: {sign}");
+    }
+
+    /// kuwoSearch 空查询不走网络，直接返回空数组（引擎里跑通参数校验分支）。
+    #[test]
+    fn netease_kuwo_search_empty() {
+        let script = include_str!("builtin/netease/index.js");
+        let v = call_function(script, "kuwoSearch", &[serde_json::json!("")], HashMap::new())
+            .expect("kuwoSearch 执行失败");
+        assert!(v.is_array() && v.as_array().unwrap().is_empty());
     }
 
     /// 音质档位：选中档优先、只向下逐档降级；非法值回落默认 exhigh。

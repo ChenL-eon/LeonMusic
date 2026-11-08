@@ -22,9 +22,17 @@ pub const USER_AGENT: &str =
 pub fn is_direct_host(url: &str) -> bool {
     // 网易系：登录风控对代理出口极敏感；
     // 咪咕系（migu.cn 全域）：海外出口会被 440001「应版权方要求，该内容
-    // 暂无法在当前地区提供服务」拒绝，搜索 / 取链 / CDN 下载统一强制直连。
-    const DIRECT_SUFFIXES: [&str; 5] =
-        ["163.com", "126.net", "163cn.tv", "netease.cn", "migu.cn"];
+    // 暂无法在当前地区提供服务」拒绝，搜索 / 取链 / CDN 下载统一强制直连；
+    // 酷我系（kuwo.cn 全域）：搜索 / BD 取链 / bd-er、kw-bj 等 CDN 都对
+    // 海外出口不稳定，且直链 token 短命，走代理会额外增加超时风险。
+    const DIRECT_SUFFIXES: [&str; 6] = [
+        "163.com",
+        "126.net",
+        "163cn.tv",
+        "netease.cn",
+        "migu.cn",
+        "kuwo.cn",
+    ];
     let lower = url.to_ascii_lowercase();
     // 只看 host 段：去掉 scheme，取第一个 '/' 之前、':' 之前的部分
     let host = lower
@@ -235,6 +243,9 @@ mod tests {
             "https://p1.music.126.net/abc.jpg",
             "https://163cn.tv/abc",
             "https://music.163.com:443/x",
+            "http://search.kuwo.cn/r.s?all=test",
+            "http://bd-api.kuwo.cn/api/play/music/v2/audioUrl?musicId=1",
+            "http://bd-er.kuwo.cn/abc/resource/trackmedia/F000.flac",
         ] {
             assert!(is_direct_host(u), "{u} 应直连");
         }
