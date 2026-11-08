@@ -846,6 +846,10 @@ function getStreamUrl(track) {
 
   var lastCode = 0;
   var trial = null;
+  // 选了无损、官方却只给 MP3：先记下来，循环结束后去第三方要 FLAC。
+  // 2026-11-08 用户实测《水之湄》即此类：官方给 320k 非试听，旧逻辑
+  // 「非试听直接 return」把第三方源彻底跳过，于是永远显示「无损未生效」。
+  var official = null;
   for (var k = 0; k < levels.length; k++) {
     var body = eapi('/api/song/enhance/player/url/v1', {
       ids: '[' + track.id + ']',
@@ -861,30 +865,42 @@ function getStreamUrl(track) {
     var item = (data.data && data.data[0]) || null;
     if (item && item.url) {
       var meta = qualityFromOfficial(item, want, levels[k]);
-      // 免费曲 / 会员已解锁：直接返回，不打扰第三方服务。
-      // 若选了无损档但官方静默给了 320k MP3，如实标 downgraded（不另去解析全曲）。
-      if (!isTrialUrlItem(item)) return streamResult(item.url, meta);
+      if (!isTrialUrlItem(item)) {
+        // 免费曲 / 会员已解锁：直接返回，不打扰第三方服务。
+        if (!wantsLossless || meta.format === 'flac') return streamResult(item.url, meta);
+        // 官方静默降级成 MP3：记下这条合法全曲，再去问第三方有没有 FLAC。
+        // 已是「非试听」，继续降档问不会变好，直接跳出循环。
+        if (!official) official = { url: item.url, meta: meta };
+        break;
+      }
       if (!trial) trial = { url: item.url, meta: meta };
     }
     if (item && item.code) lastCode = item.code;
   }
 
-  // 只有官方不给全曲时才解析；失败就保留原试听，让上层弹 30 秒提示
+  // 官方不给全曲、或只给 MP3 时解析；失败再退回官方全曲 / 试听
   if (unblockOn()) {
     var resolved = resolveTrack(track);
     if (resolved && resolved.url) {
       var fmt = formatFromUrl(resolved.url);
-      return streamResult(resolved.url, {
-        source: 'resolved',
-        bitrate: resolved.br ? Math.round(resolved.br * 1000) : null,
-        format: fmt,
-        trial: false,
-        requested: want,
-        // 请求无损档却只拿到 mp3，也算降级
-        downgraded: wantsLossless && fmt !== 'flac'
-      });
+      var resolvedBr = Number(resolved.br) || 0;
+      // 官方已有合法全曲（只是不到无损）时，只有解析确实拿到 FLAC 才替换：
+      // 解析也可能只给 128k/320k，官方链更稳，不该越换越差。
+      if (!official || (resolvedBr >= 900 && fmt === 'flac')) {
+        return streamResult(resolved.url, {
+          source: 'resolved',
+          bitrate: resolved.br ? Math.round(resolved.br * 1000) : null,
+          format: fmt,
+          trial: false,
+          requested: want,
+          // 请求无损档却只拿到 mp3，也算降级
+          downgraded: wantsLossless && fmt !== 'flac'
+        });
+      }
     }
   }
+  // 官方 320k 全曲优先于试听：至少是完整的一首
+  if (official) return streamResult(official.url, official.meta);
   if (trial) {
     trial.meta.source = 'trial';
     trial.meta.trial = true;
