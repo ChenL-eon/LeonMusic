@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 移动端外壳：一级页 + 二级页 + 全屏播放覆盖层 + 悬浮胶囊导航。
  *  桌面完全不走这里（App.vue 按 860px 断点分流），改动不会波及侧栏布局。 */
-import { computed, onMounted, ref, watch, type Component } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
 
 import Icon from "@/components/Icon.vue";
 import AccountView from "@/views/Account.vue";
@@ -86,6 +86,13 @@ onMounted(() => {
   bootstrapped = true;
   history.pushState({ mguard: true }, "");
   window.addEventListener("popstate", onSysBack);
+});
+
+// 桌面窗口拖到 860px 以下会挂载这个壳，拖回去又卸载。
+// 不解绑的话每来回一次就多一个 popstate 监听，两个闭包各自 pushState
+// 并各弹一层页面，返回手势会一次退两页。
+onUnmounted(() => {
+  window.removeEventListener("popstate", onSysBack);
 });
 
 /** 桌面视图里少数地方会调 ui.go('now')（播放后跳播放页）。
