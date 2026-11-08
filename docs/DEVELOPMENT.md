@@ -960,6 +960,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | 探测失败可读化（本次） | `cargo test --lib` + 本地 mock HTTP | ✅ 三种非音频响应的错误文案：HTML → 「音源返回的不是音频（网页/XML，Content-Type: text/html; charset=utf-8）：「<!DOCTYPE html>…」——链接可能已失效或需要登录」；JSON → 同类 JSON 结论；空体 → `probe failed …（来源没有返回任何数据）`。本地加密头（`CTENFDAM…`）→ 错误附 `文件开头字节 43 54 45 4e…`；0 字节 → `（文件是空的：0 字节）`。`HttpStream` 新增 `content_type()` / `sniff()`（不改读游标）；49 passed / 0 failed |
 | 起播耗时归因（本次） | 真实联网基准（Boa 宿主 + 真实 CDN，同一首连测） | ✅ 解析链是 4 个串行请求：酷我搜索 199–217ms / 广告解锁 87–143ms / 取链 84–91ms / Range 长度探测 23–24ms，`resolveTrack` 内部 494–523ms，另加每次新建 Context 的 eval 85–96ms。起播段（开流 + probe + 首个解码块）原本要再冷握一次 CDN 证书 ~200ms，共享连接池 + 探测预热后降到 17–34ms；冷连接首请求 208ms vs 复用 25ms |
 | 坏缓存防护（本次） | `cargo test --lib` + 桌面缓存实扫 | ✅ 落盘前按魔数校验（ID3 / fLaC / OggS / RIFF / ftyp / MP3 帧同步 / ASF）：`.part` 大小等于 Content-Length 但内容不是音频时**只跳过缓存**，播放不受影响；打开缓存失败时只删除 media 缓存目录内的文件并清库记录，用户本地音乐不碰。测试：HTML 正文（长度精确匹配）不落盘且 `.part` 被清理、魔数表 flac/id3/帧同步/m4a/wav/html/json/空。桌面缓存目录现存 4 文件 154.9 MB 全为音频，无历史坏文件。51 passed / 0 failed |
+| 启动不再等曲库（本次） | `npm run build` + `build/mock_tauri.js`（可延迟指定 IPC）+ 无头 Edge 390×844 / 1280×800 | ✅ 曲库 IPC 延迟 2000ms：300ms 时首页已渲染、6 行骨架（52px 封面与真实行同尺寸，填充不跳动）、全程无启动遮罩；2s 后骨架消失、8 行真实曲目。延迟 0：`bootSpinner` 从未出现。播放器快照延迟 600ms：320ms 时显示 spinner「正在启动…」，1300ms 后首页就绪。桌面 1280 宽：侧栏/播放条正常，仅主区居中 spinner。首屏只等 `settings`+`player`（4 个 IPC），曲库与播放器并行且不阻塞渲染 |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
 （普通 / 多时间标签 / 逐字 / 偏移 / 同时间戳译文合并）、文件名解析、
