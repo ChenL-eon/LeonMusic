@@ -364,4 +364,59 @@ mod tests {
         let out = r.process(&input);
         assert!(out.len() > 1900, "len={}", out.len());
     }
+
+    /// 诊断用：打印每个解码块的帧数。
+    /// FLAC 固定 4096 帧/包，远超 CHUNK_FRAMES，曾导致 pump 往 ring 里
+    /// 推到一半失败、尾部样本被静默丢弃（听感就是断续 + 颤音）。
+    #[test]
+    #[ignore]
+    fn probe_chunk_frames() {
+        let path = std::path::Path::new(r"E:\Demo\LeonMusic\build\tmp\sample.flac");
+        if !path.exists() {
+            return;
+        }
+        let mut s = crate::audio::decoder::DecodeSource::open(path).expect("open");
+        println!(
+            "rate={} ch={} dur={}ms",
+            s.sample_rate(),
+            s.channels(),
+            s.duration_ms()
+        );
+        for i in 0..6 {
+            let c = s.next_chunk(2048).expect("chunk").expect("eof");
+            let frames = c.samples.len() / c.channels;
+            let peak = c.samples.iter().fold(0f32, |a, b| a.max(b.abs()));
+            println!("chunk{i}: frames={frames} peak={peak:.3}");
+            assert!(
+                frames <= 2048,
+                "chunk{i} 交付了 {frames} 帧，超过 max_frames —— ring 装不下会丢样本"
+            );
+        }
+        // 前 0.5 秒可能是静音，跳到 60 秒再抽样，确认不是「整首都很小声」
+        for ms in [60_000u64, 120_000, 200_000] {
+            s.seek(ms).expect("seek");
+            let c = s.next_chunk(2048).expect("chunk").expect("eof");
+            let peak = c.samples.iter().fold(0f32, |a, b| a.max(b.abs()));
+            let rms = (c.samples.iter().map(|v| v * v).sum::<f32>() / c.samples.len() as f32).sqrt();
+            println!("@{ms}ms peak={peak:.4} rms={rms:.5}");
+        }
+
+        // 整首解完的帧数必须等于 STREAMINFO 的 total_samples：
+        // 少了就说明 pending 缓存有丢样本（修复前正是这个症状）。
+        // 用全新实例从 0 开始，避免 seek 定位误差混进统计。
+        let mut full = crate::audio::decoder::DecodeSource::open(path).expect("reopen");
+        let mut total = 0usize;
+        while let Some(c) = full.next_chunk(2048).expect("chunk") {
+            total += c.samples.len() / c.channels;
+        }
+        println!("decoded frames total={total} (STREAMINFO 11895828)");
+        // STREAMINFO 的 total_samples 与实际流长度允许有极小差异
+        // （编码器 padding / 末帧不足整块），但要远小于 1%——
+        // 真丢样本时是按块的整数倍掉，差值会是十万量级。
+        let diff = (total as i64 - 11_895_828i64).abs();
+        assert!(
+            diff * 1000 < 11_895_828,
+            "整首帧数偏差 {diff}，解码链路疑似丢样本"
+        );
+    }
 }

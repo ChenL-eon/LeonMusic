@@ -127,6 +127,12 @@ pub struct SymphoniaSource {
     base_ms: u64,
     eof: bool,
     sample_buf: Option<SampleBuffer<f32>>,
+    /// 上一个解码包里超出 `max_frames` 的样本。
+    ///
+    /// FLAC 固定 4096 帧/包，是 CHUNK_FRAMES(2048) 的两倍：不缓存的话
+    /// `next_chunk` 会真的返回 4096 帧，调用方按 2048 帧预估的 ring 空间
+    /// 装不下，剩下的被静默丢掉 —— 听感就是持续断续加颤音。
+    pending: Vec<f32>,
 }
 
 impl SymphoniaSource {
@@ -215,16 +221,24 @@ impl SymphoniaSource {
             base_ms: 0,
             eof: false,
             sample_buf: None,
+            pending: Vec::new(),
         })
     }
 
     fn next_chunk(&mut self, max_frames: usize) -> AppResult<Option<DecodedChunk>> {
-        if self.eof {
+        if self.eof && self.pending.is_empty() {
             return Ok(None);
         }
-        let mut out: Vec<f32> = Vec::with_capacity(max_frames * self.channels);
+        let want = max_frames * self.channels;
+        let mut out: Vec<f32> = Vec::with_capacity(want);
 
-        while out.len() / self.channels < max_frames {
+        // 上一包解出来但没交出去的部分先补上，保证每次交付 ≤ max_frames
+        if !self.pending.is_empty() {
+            let take = want.min(self.pending.len());
+            out.extend(self.pending.drain(..take));
+        }
+
+        while out.len() < want && !self.eof {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
                 Err(SymError::IoError(e))
@@ -248,20 +262,31 @@ impl SymphoniaSource {
             match self.decoder.decode(&packet) {
                 Ok(decoded) => {
                     let spec = *decoded.spec();
-                    if self.sample_rate != spec.rate || self.channels != spec.channels.count() {
+                    let ch = spec.channels.count();
+                    if self.sample_rate != spec.rate || self.channels != ch {
                         self.sample_rate = spec.rate;
-                        self.channels = spec.channels.count();
+                        self.channels = ch;
                     }
                     let capacity = decoded.capacity() as u64;
+                    let frames = decoded.frames() as u64;
+                    // 分字段借用：sample_buf 与 pending 同时可变借，不能走 self
                     let buf = self
                         .sample_buf
                         .get_or_insert_with(|| SampleBuffer::<f32>::new(capacity, spec));
                     if buf.capacity() < decoded.frames() {
                         *buf = SampleBuffer::<f32>::new(capacity, spec);
                     }
-                    let frames = decoded.frames() as u64;
                     buf.copy_interleaved_ref(decoded);
-                    out.extend_from_slice(buf.samples());
+                    let room = want - out.len();
+                    {
+                        let samples = buf.samples();
+                        if samples.len() <= room {
+                            out.extend_from_slice(samples);
+                        } else {
+                            out.extend_from_slice(&samples[..room]);
+                            self.pending.extend_from_slice(&samples[room..]);
+                        }
+                    }
                     self.frames_out += frames;
                 }
                 // 单帧损坏不应中断整首播放
@@ -295,6 +320,8 @@ impl SymphoniaSource {
         self.frames_out = 0;
         self.base_ms = position_ms;
         self.eof = false;
+        // seek 前的残留样本属于旧位置，必须丢掉
+        self.pending.clear();
         Ok(())
     }
 

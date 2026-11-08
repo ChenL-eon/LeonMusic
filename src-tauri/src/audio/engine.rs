@@ -508,6 +508,14 @@ struct Session {
     anchor_frames: u64,
     /// 上次参与换算的速度（用于检测变化）
     applied_speed: f32,
+    /// DSP 已经算好、但 ring buffer 当时放不下的样本（按交错 f32 存）。
+    ///
+    /// 变速/变调时重采样比不再等于「源率 → 48k」，一块 2048 帧的输入可能
+    /// 变成远超 2048 帧的输出；只按入参预估的 slots 阈值会不够，硬推就会
+    /// 丢尾部样本（断续 + 颤音）。这里把装不下的部分攒着下一轮再送。
+    pending_pcm: Vec<f32>,
+    /// `pending_pcm` 已送出的前缀长度（避免每轮 drain 造成 O(n²) 拷贝）
+    pending_pos: usize,
     paused: bool,
     eof: bool,
 }
@@ -526,6 +534,8 @@ impl Session {
             anchor_ms: 0,
             anchor_frames: 0,
             applied_speed: 1.0,
+            pending_pcm: Vec::new(),
+            pending_pos: 0,
             paused: false,
             eof: false,
         })
@@ -622,6 +632,8 @@ impl Session {
         output.shared.reset_transport();
         self.wsola.reset();
         self.resampler.reset();
+        self.pending_pcm.clear();
+        self.pending_pos = 0;
         self.anchor_ms = ms;
         self.anchor_frames = 0;
         self.eof = false;
@@ -648,9 +660,26 @@ impl Session {
             self.rebase(output, speed_now);
         }
 
-        if self.paused || self.eof {
+        if self.paused {
             return Ok(());
         }
+
+        // 上一轮没塞进 ring 的样本优先送完，否则它们会被新算出来的
+        // 样本挤到后面，听感上就是周期性缺一块。
+        // 放在 eof 判断之前：解码到结尾时也要把尾巴送完，不能截断。
+        while self.pending_pos < self.pending_pcm.len() {
+            match output.producer.push(self.pending_pcm[self.pending_pos]) {
+                Ok(()) => self.pending_pos += 1,
+                Err(_) => return Ok(()),
+            }
+        }
+        self.pending_pcm.clear();
+        self.pending_pos = 0;
+
+        if self.eof {
+            return Ok(());
+        }
+
         let channels = OUTPUT_CHANNELS as usize;
         let need = CHUNK_FRAMES * channels;
         if output.producer.slots() < need + 2048 {
@@ -695,19 +724,33 @@ impl Session {
             }
         }
 
-        for s in pcm {
-            if output.producer.push(s).is_err() {
-                break;
-            }
-        }
+        // 装不下的部分不能丢：攒进 pending，下一轮先送（见字段注释）
+        push_or_park(&mut output.producer, &pcm, &mut self.pending_pcm);
         Ok(())
+    }
+}
+
+/// 把样本推进 ring；ring 满了之后剩下的**攒进 `pending`**，不能丢。
+///
+/// 老写法是 `if push(s).is_err() { break; }`：一块 4096 帧的 FLAC 包经
+/// 44.1k→48k 重采样后约 8900 样本，而按 2048 帧入参预估的 slots 门槛
+/// 只有 6144，尾部 30% 直接被扔掉 —— 听感就是持续断续加颤音。
+fn push_or_park(producer: &mut rtrb::Producer<f32>, samples: &[f32], pending: &mut Vec<f32>) {
+    let mut blocked = false;
+    for &s in samples {
+        if !blocked {
+            if producer.push(s).is_ok() {
+                continue;
+            }
+            blocked = true;
+        }
+        pending.push(s);
     }
 }
 
 // ---------------------------------------------------------------------------
 // 引擎主循环
 // ---------------------------------------------------------------------------
-
 fn run_engine(
     rx: Receiver<EngineCommand>,
     shared: Arc<SharedState>,
@@ -1215,4 +1258,36 @@ fn broadcast_queue(queue: &PlayQueue, shared: &SharedState, app: &AppHandle) {
     shared.revision.fetch_add(1, Ordering::AcqRel);
     let _ = app.emit(events::EVT_QUEUE, &snap);
     let _ = app.emit(events::EVT_PLAYER_STATE, &shared.snapshot());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：ring 装不下的样本必须攒进 pending，而不是被 break 丢掉。
+    /// 触发场景是 FLAC 4096 帧包 + 44.1k→48k 重采样后超出 slots 预估。
+    #[test]
+    fn overflow_is_parked_not_dropped() {
+        let (mut producer, mut consumer) = rtrb::RingBuffer::<f32>::new(8);
+        let mut pending = Vec::new();
+        let input: Vec<f32> = (0..10).map(|i| i as f32).collect();
+
+        push_or_park(&mut producer, &input, &mut pending);
+
+        assert_eq!(pending, vec![8.0, 9.0], "溢出样本被丢掉了");
+        let mut ring = Vec::new();
+        while let Ok(v) = consumer.pop() {
+            ring.push(v);
+        }
+        assert_eq!(ring, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    }
+
+    /// ring 有余量时不该产生 pending。
+    #[test]
+    fn fits_without_parking() {
+        let (mut producer, _consumer) = rtrb::RingBuffer::<f32>::new(16);
+        let mut pending = Vec::new();
+        push_or_park(&mut producer, &[1.0, 2.0, 3.0], &mut pending);
+        assert!(pending.is_empty());
+    }
 }
