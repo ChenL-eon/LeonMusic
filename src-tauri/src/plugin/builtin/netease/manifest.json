@@ -52,7 +52,7 @@
       "fieldType": "string",
       "default": "",
       "required": false,
-      "placeholder": "api-enhanced 服务（VutronMusic 同款），如 http://127.0.0.1:3010；留空跳过"
+      "placeholder": "api-enhanced 服务（VutronMusic 同款）。桌面填 http://127.0.0.1:3010；手机填电脑局域网 IP（如 http://192.168.1.2:3010），需同一 Wi-Fi 且电脑开着服务；留空跳过"
     },
     {
       "key": "kgapiBase",
@@ -60,7 +60,7 @@
       "fieldType": "string",
       "default": "",
       "required": false,
-      "placeholder": "KuGouMusicApi 服务，如 http://127.0.0.1:3020；留空跳过"
+      "placeholder": "KuGouMusicApi 服务。桌面填 http://127.0.0.1:3020；手机填电脑局域网 IP（如 http://192.168.1.2:3020），需同一 Wi-Fi 且电脑开着服务；留空跳过"
     },
     {
       "key": "kgapiCookie",
