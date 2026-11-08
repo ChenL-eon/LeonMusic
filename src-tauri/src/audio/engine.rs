@@ -38,6 +38,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::decoder::DecodeSource;
 use super::dsp::{adapt_channels, db_to_linear, soft_clip, StreamResampler, Wsola};
 use super::queue::{PlayQueue, QueueSnapshot};
+use super::resume;
 use super::sink::{build_pipeline, AudioPipeline};
 use crate::error::{AppError, AppResult};
 use crate::events;
@@ -75,6 +76,13 @@ pub struct SharedState {
     error: RwLock<Option<String>>,
     /// 最近一次在线解析的真实规格；带 trackId，切歌后快照自动不显示。
     quality: RwLock<Option<StreamQuality>>,
+    /// 待恢复的播放位置：只有启动恢复的那首歌第一次开播时才消费一次。
+    /// `(track_id, position_ms)`；见 `audio::resume`。
+    pending_resume: parking_lot::Mutex<Option<(String, u64)>>,
+    /// 引擎启动恢复（含「无历史」判定）已完成。ticker 在此之前不能
+    /// 清理/保存状态文件——它可能跑在引擎恢复段前面，把刚写好的
+    /// 状态文件误删或用默认值覆盖。
+    resume_done: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -102,6 +110,8 @@ impl Default for SharedState {
             }),
             error: RwLock::new(None),
             quality: RwLock::new(None),
+            pending_resume: parking_lot::Mutex::new(None),
+            resume_done: AtomicBool::new(false),
         }
     }
 }
@@ -221,6 +231,31 @@ impl SharedState {
 
     pub fn queue_snapshot(&self) -> QueueSnapshot {
         self.queue.read().clone()
+    }
+
+    /// 记住「下次点播放要从这里继续」的位置（启动恢复写入）。
+    pub fn set_resume(&self, track_id: String, position_ms: u64) {
+        *self.pending_resume.lock() = Some((track_id, position_ms));
+    }
+
+    /// 只在当前要播的正是恢复的那首歌时返回记忆位置并消费，
+    /// 避免之后手动重播同一首又被拉回旧进度。
+    pub fn take_resume_for(&self, track_id: &str) -> Option<u64> {
+        let mut g = self.pending_resume.lock();
+        if g.as_ref().is_some_and(|(id, _)| id == track_id) {
+            g.take().map(|(_, pos)| pos)
+        } else {
+            None
+        }
+    }
+
+    /// 只读不消费：Buffering 期间进度条仍显示记忆位置。
+    pub fn peek_resume_for(&self, track_id: &str) -> Option<u64> {
+        self.pending_resume
+            .lock()
+            .iter()
+            .find(|(id, _)| id == track_id)
+            .map(|(_, pos)| *pos)
     }
 
     pub fn snapshot(&self) -> PlayerSnapshot {
@@ -353,6 +388,10 @@ fn ticker(app: AppHandle, shared: Arc<SharedState>, platform: Arc<dyn PlatformHo
     let mut last_position_ms = 0u64;
     let mut listened_ms = 0u64;
 
+    // 播放进度记忆：队列/曲目/模式变化立即落盘，播放中每 5 秒刷进度
+    let mut last_saved_sig = String::new();
+    let mut last_saved_at = std::time::Instant::now();
+
     loop {
         thread::sleep(Duration::from_millis(120));
         let snap = shared.snapshot();
@@ -395,6 +434,34 @@ fn ticker(app: AppHandle, shared: Arc<SharedState>, platform: Arc<dyn PlatformHo
             }
         }
         last_position_ms = snap.position_ms;
+
+        // ---- 播放进度记忆 ----
+        // 变化信号：曲目 | 模式 | 队列长度。播放中每 5 秒额外刷一次
+        // 进度（seek 不改变信号，最多回退 5 秒，可接受）。
+        // 恢复完成前不动状态文件（见 resume_done 字段说明）。
+        if shared.resume_done.load(Ordering::Acquire) {
+            let save_sig = format!(
+                "{}|{}|{}|{}",
+                current_id,
+                shared.repeat() as u8,
+                shared.shuffle(),
+                snap.queue_len
+            );
+            if save_sig != last_saved_sig {
+                last_saved_sig = save_sig;
+                last_saved_at = std::time::Instant::now();
+                if current_id.is_empty() {
+                    resume::clear_async();
+                } else {
+                    resume::save_async(&shared);
+                }
+            } else if snap.status == PlaybackStatus::Playing
+                && last_saved_at.elapsed() >= Duration::from_millis(5_000)
+            {
+                last_saved_at = std::time::Instant::now();
+                resume::save_async(&shared);
+            }
+        }
     }
 }
 
@@ -651,6 +718,34 @@ fn run_engine(
     let mut session: Option<Session> = None;
     let mut output: Option<AudioPipeline> = None;
 
+    // ---- 上次播放恢复 ----
+    // 只把队列/模式/当前曲就位（status 仍是 Idle），不自动播放：
+    // 用户点播放（Toggle/Resume）才加载解码器，位置在 start_track 里消费。
+    if let Some(saved) = resume::load() {
+        let cur_track = saved
+            .queue
+            .current
+            .and_then(|i| saved.queue.items.get(i))
+            .cloned();
+        if let Some(track) = cur_track {
+            queue.set_items(saved.queue.items, saved.queue.current);
+            queue.set_repeat(saved.queue.repeat);
+            queue.set_shuffle(saved.queue.shuffle);
+            shared.repeat.store(saved.queue.repeat as u8, Ordering::Relaxed);
+            shared.shuffle.store(saved.queue.shuffle, Ordering::Relaxed);
+            *shared.queue.write() = queue.snapshot();
+            shared.set_resume(track.id.clone(), saved.position_ms);
+            shared
+                .duration_ms
+                .store(track.duration_ms.max(0) as u64, Ordering::Relaxed);
+            shared.position_ms.store(saved.position_ms, Ordering::Relaxed);
+            *shared.track.write() = Some(track);
+            shared.bump();
+            tracing::info!("playback state restored from last session");
+        }
+    }
+    shared.resume_done.store(true, Ordering::Release);
+
     loop {
         match rx.recv_timeout(TICK) {
             Ok(EngineCommand::Shutdown) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -811,7 +906,10 @@ fn start_track(
         shared
             .duration_ms
             .store(track.duration_ms.max(0) as u64, Ordering::Relaxed);
-        shared.position_ms.store(0, Ordering::Relaxed);
+        // 恢复场景：解析期间进度条仍显示记忆位置（真正开播时才消费）
+        shared
+            .position_ms
+            .store(shared.peek_resume_for(&track.id).unwrap_or(0), Ordering::Relaxed);
         shared.set_status(PlaybackStatus::Buffering);
         platform.update_now_playing(&shared.snapshot());
         platform.update_playback_state(false);
@@ -824,6 +922,12 @@ fn start_track(
         Ok(mut s) => {
             // 切歌：清掉上一首残留在 ring 里的样本
             output.shared.reset_transport();
+            // 没有显式起点时，消费「上次播放进度」的记忆（仅启动恢复那首有效）
+            let start_ms = if start_ms == 0 {
+                shared.take_resume_for(&track.id).unwrap_or(0)
+            } else {
+                start_ms
+            };
             if start_ms > 0 {
                 let _ = s.seek(start_ms, output);
             }
@@ -956,6 +1060,17 @@ fn handle_command(
                 } else {
                     shared.position_ms.store(ms, Ordering::Relaxed);
                 }
+            } else {
+                // 还没开播（典型：启动恢复态）——没有可 seek 的解码器，
+                // 更新显示位置；若是恢复的那首，记忆位置一并改写。
+                shared.position_ms.store(ms, Ordering::Relaxed);
+                let tid = shared.track.read().as_ref().map(|t| t.id.clone());
+                if let Some(id) = tid {
+                    if shared.peek_resume_for(&id).is_some() {
+                        shared.set_resume(id, ms);
+                    }
+                }
+                shared.bump();
             }
         }
         EngineCommand::SetVolume(v) => {

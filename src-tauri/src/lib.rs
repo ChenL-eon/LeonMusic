@@ -120,12 +120,14 @@ pub fn run() {
             state::set_engine(engine.clone());
 
             // 4. 把持久化的播放参数灌进引擎
+            // 注意 repeat/shuffle 不在这里灌：播放模式随队列/进度一起
+            // 持久化在 playback-state.json（见 audio::resume），由引擎
+            // 启动恢复；settings 里遗留的字段只作存储兼容，若再灌会
+            // 把恢复出来的模式覆盖回旧值。
             engine.send(EngineCommand::SetVolume(settings.volume));
             engine.send(EngineCommand::SetSpeed(settings.speed));
             engine.send(EngineCommand::SetPitch(settings.pitch));
             engine.send(EngineCommand::SetGain(settings.gain_db));
-            engine.send(EngineCommand::SetRepeat(settings.repeat));
-            engine.send(EngineCommand::SetShuffle(settings.shuffle));
 
             // 5. 插件 & 缓存
             let plugins = Arc::new(PluginManager::init(

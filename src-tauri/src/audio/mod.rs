@@ -14,6 +14,7 @@ pub mod decoder;
 pub mod dsp;
 pub mod engine;
 pub mod queue;
+pub mod resume;
 pub mod sink;
 
 // Android 用 cpal 的 Oboe 后端，只是构造参数不同（见 sink_android 的注释）。

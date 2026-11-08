@@ -23,13 +23,13 @@ pub fn settings_update(app: AppHandle, settings: Settings) -> AppResult<Settings
     }
     st.db.save_settings(&settings)?;
 
-    // 即时生效的部分
+    // 即时生效的部分。
+    // repeat/shuffle 不在此列：播放模式以 playback-state.json 为准
+    // （随队列/进度一起恢复），用户改设置不该顺手覆盖它。
     st.engine.send(EngineCommand::SetVolume(settings.volume));
     st.engine.send(EngineCommand::SetSpeed(settings.speed));
     st.engine.send(EngineCommand::SetPitch(settings.pitch));
     st.engine.send(EngineCommand::SetGain(settings.gain_db));
-    st.engine.send(EngineCommand::SetRepeat(settings.repeat));
-    st.engine.send(EngineCommand::SetShuffle(settings.shuffle));
 
     // 广播给所有窗口（含桌面歌词窗）：两窗各有一份 Pinia settings 实例，
     // 靠这条事件保持同步（歌词窗工具条改字号/锁定，设置页立即跟着变）。
