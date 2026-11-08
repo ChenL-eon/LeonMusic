@@ -212,6 +212,7 @@ const BACKEND_SOURCES = [
   { id: "gd", name: "GD 音乐台", desc: "社区解析，无损优先，可能限流" },
   { id: "migu", name: "咪咕音乐", desc: "免登录直链，国内直连最稳，可升无损" },
   { id: "kw", name: "酷我音乐", desc: "128k 直链，轻量兜底" },
+  { id: "kg", name: "酷狗音乐", desc: "免费曲可升 320k/FLAC，独家 VIP 曲拿不到" },
   { id: "bili", name: "bilibili", desc: "DASH 音频，严格匹配标题并过滤翻唱" },
 ] as const;
 

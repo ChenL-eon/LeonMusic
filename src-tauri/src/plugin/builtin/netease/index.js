@@ -315,11 +315,13 @@ function unblockOn() {
  *   gd               —— GD 音乐台（无损优先，但会限流 / 间歇 503）
  *   migu             —— 咪咕直链（内置实现，免登录完整曲，可升无损；自家 CDN 最稳）
  *   kw               —— 酷我直链（内置实现，128k 全曲，GD 挂了它兜底）
+ *   kg               —— 酷狗直链（内置实现，UNM 同款 trackercdn 配方，
+ *                       免费曲可升 320k / FLAC；酷狗独家 VIP 曲拿不到）
  *   bili             —— bilibili 视频区 DASH（内置实现，FLAC 184k / AAC 83k，
  *                       翻唱过滤 + 标题歌手严格匹配，末位兜底）
  *   meting:<地址>     —— 任意 Meting 兼容后端（自建 Meting-API 等）
  *
- * 默认链 = gd → migu → kw → bili + 「Meting 地址」配置（若已填）。unblockBackends
+ * 默认链 = gd → migu → kw → kg → bili + 「Meting 地址」配置（若已填）。unblockBackends
  * 写了逗号序列时按用户给的顺序整链重置（设置 → 播放 → 解析播放源 生成）；
  * 写 off/none 表示全部关闭，直接跳过解析（受限歌曲只播官方试听）。
  */
@@ -335,6 +337,7 @@ function resolveBackends() {
   push('gd', '');
   push('migu', '');
   push('kw', '');
+  push('kg', '');
   push('bili', '');
   if (metingBase()) push('meting', metingBase());
 
@@ -357,6 +360,10 @@ function resolveBackends() {
       }
       if (seg === 'kw' || seg === 'kuwo') {
         push('kw', '');
+        continue;
+      }
+      if (seg === 'kg' || seg === 'kugou') {
+        push('kg', '');
         continue;
       }
       if (seg === 'bili' || seg === 'bilibili') {
@@ -424,9 +431,11 @@ function resolveTrack(track) {
           ? miguResolve(track, br)
           : backends[i].kind === 'kw'
             ? kwResolve(track)
-            : backends[i].kind === 'bili'
-              ? biliResolve(track)
-              : metingResolve(backends[i].base, track, br);
+            : backends[i].kind === 'kg'
+              ? kgResolve(track, br)
+              : backends[i].kind === 'bili'
+                ? biliResolve(track)
+                : metingResolve(backends[i].base, track, br);
     } catch (e) {
       r = null; // 单个后端的任何异常都不能影响其它后端
     }
@@ -894,15 +903,148 @@ function miguResolve(track, br) {
 }
 
 // ---------------------------------------------------------------------------
+// 酷狗音源（内置后端，VutronMusic / UNM 链里的主力源补位）
+// ---------------------------------------------------------------------------
+//
+// UNM（@unblockneteasemusic/server，VutronMusic 内置解锁用的就是它）的酷狗
+// provider 配方，2026-11-08 实测仍然可用：
+//
+//   搜索  https://mobiles.kugou.com/api/v3/search/song
+//         v3 老接口免签名，返回 hash / 320hash / sqhash / album_id /
+//         duration（秒）/ filename（"歌手 - 歌名【备注】"）。
+//         UNM 用的 http://mobilecdn 同源，但实测偶发连接失败，mobiles 稳定。
+//   取链  https://trackercdn.kugou.com/i/v2/?key=md5(hash + 'kgcloudv2')
+//         &hash=<hash>&appid=1005&pid=2&cmd=25&behavior=play&album_id=...
+//         免签名的老 tracker 协议：status:1 → url[0] 直链；status:2 =
+//         酷狗侧 VIP / 独家付费墙（邓紫棋、周杰伦这类腾讯独家目录）。
+//         免费曲可达无损：实测蔡依林《日不落》sqhash 直出 29MB FLAC。
+//         11-07 的盘点把「VIP 曲 status:2」误判成整站已死——免费曲一直活着。
+//
+// 与 UNM 的差异：UNM 拿到 url 就返回（不报码率）；这里按 hash 档位如实
+// 标 br（sq≈900 flac / 320 / 128），formatFromUrl 按扩展名识别容器。
+// 音频直链是 http://（fsandroid.tx.kugou.com），安卓 cleartext 已由
+// apply.py 注入 usesCleartextTraffic=true，双端都能播。
+// 匹配用 filename 而不是 songname：版本词（Live/现场/电影插曲）都在
+// filename 里，songname 是裸歌名，会漏过版本拦截。
+
+var KG_SEARCH_API = 'https://mobiles.kugou.com/api/v3/search/song';
+var KG_TRACK_API = 'https://trackercdn.kugou.com/i/v2/';
+var KG_FAIL_MS = 30 * 60 * 1000;
+var kgFailIds = {};
+
+function kgGet(base, params) {
+  var qs = [];
+  for (var k in params) {
+    if (!Object.prototype.hasOwnProperty.call(params, k)) continue;
+    var v = params[k];
+    if (v === undefined || v === null || v === '') continue;
+    qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+  }
+  try {
+    return JSON.parse(
+      leon.http.get(base + '?' + qs.join('&'), {
+        timeoutMs: 3500,
+        headers: { Referer: 'https://www.kugou.com/' }
+      })
+    );
+  } catch (e) {
+    return null; // 限流 / 挂掉不能影响主链路
+  }
+}
+
+/** 搜索 → 统一成 gdCandidateMatches 的候选形状。name 用 filename（带版本词）。 */
+function kgSearch(query) {
+  var d = kgGet(KG_SEARCH_API, { format: 'json', keyword: query, page: 1, pagesize: 5 });
+  var info = d && d.data && d.data.info;
+  if (!Array.isArray(info)) return [];
+  var out = [];
+  for (var i = 0; i < info.length; i++) {
+    var it = info[i];
+    if (!it || !it.hash) continue;
+    out.push({
+      name: it.filename || (it.singername + ' - ' + it.songname),
+      artist: it.singername || '',
+      durationMs: (Number(it.duration) || 0) * 1000,
+      hashes: {
+        sq: it.sqhash || '',
+        hq: it['320hash'] || '',
+        std: it.hash
+      },
+      albumId: String(it.album_id || '')
+    });
+  }
+  return out;
+}
+
+/** 单个 hash 取链：status:1 且有 url 才算成功。 */
+function kgTrackFor(hash, albumId) {
+  if (!hash) return null;
+  var d = kgGet(KG_TRACK_API, {
+    key: leon.md5(hash + 'kgcloudv2'),
+    hash: hash,
+    appid: 1005,
+    pid: 2,
+    cmd: 25,
+    behavior: 'play',
+    album_id: albumId
+  });
+  var url = d && d.status === 1 && Array.isArray(d.url) && d.url[0];
+  if (!url || typeof url !== 'string') return null;
+  return url.indexOf('http') === 0 ? url : null;
+}
+
+/** 酷狗解析：搜索 → 严格匹配 → 按 unblockBr 档位选 hash 逐级取链。
+ *  br 999 = sq → hq → std；320/192 = hq → std；其余只用 std。 */
+function kgResolve(track, br) {
+  br = Number(br) || 0;
+  // 这首歌刚失败过（酷狗独家/VIP 的常态）：30 分钟内别再撞，切歌等待 ≈ 0
+  var blocked = kgFailIds[track.id];
+  if (blocked && Date.now() < blocked) return null;
+
+  var query = (track.title + ' ' + (track.artist || '')).trim();
+  if (query.length < 2) return null;
+  var hit = null;
+  var list = kgSearch(query);
+  for (var i = 0; i < list.length; i++) {
+    if (gdCandidateMatches(track, list[i])) { hit = list[i]; break; }
+  }
+  if (!hit && track.title && track.title !== query) {
+    list = kgSearch(track.title);
+    for (var j = 0; j < list.length; j++) {
+      if (gdCandidateMatches(track, list[j])) { hit = list[j]; break; }
+    }
+  }
+  if (!hit) {
+    kgFailIds[track.id] = Date.now() + KG_FAIL_MS;
+    return null;
+  }
+
+  var wants = br >= 999 ? ['sq', 'hq', 'std'] : br >= 192 ? ['hq', 'std'] : ['std'];
+  var brOf = { sq: 900, hq: 320, std: 128 }; // flac 码率不固定，展示按 ~900k
+  for (var w = 0; w < wants.length; w++) {
+    var tier = wants[w];
+    var url = kgTrackFor(hit.hashes[tier], hit.albumId);
+    if (url) {
+      delete kgFailIds[track.id];
+      return { url: url, br: brOf[tier] };
+    }
+  }
+  kgFailIds[track.id] = Date.now() + KG_FAIL_MS;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // bilibili 音源（内置后端，末位兜底）
 // ---------------------------------------------------------------------------
 //
 // 2026-11-07 实测存活率盘点的结论（同日更新：咪咕经新接口复活，见上）：
-// VutronMusic / UNM-Node 生态里的酷狗（trackercdn 老协议 status:2 付费墙）、
-// 波点（bd-api sign invalid）已死；咪咕 scr_search_tag 老接口虽死，但
-// bmw/search + listen-url/h5/v2.4 新链路全活、免登录且自家 CDN 最稳。
-// 酷我 mobi.s 加密通道活着但匿名同样锁 128k，与 antiserver 同级无增益。
-// B 站视频区 DASH 仍是全链路存活且取链协议公开的兜底：
+// VutronMusic / UNM-Node 生态里的酷狗（trackercdn 老协议）当时全回
+// status:2——后经复核那批是 VIP/独家曲的付费墙形态，免费曲 status:1
+// 一直可用，已作为内置后端接入（见上）；波点（bd-api sign invalid）已死；
+// 咪咕 scr_search_tag 老接口虽死，但 bmw/search + listen-url/h5/v2.4 新链路
+// 全活、免登录且自家 CDN 最稳。酷我 mobi.s 加密通道活着但匿名同样锁 128k，
+// 与 antiserver 同级无增益。B 站视频区 DASH 仍是全链路存活且取链协议公开
+// 的兜底：
 //   Wbi 签名搜索（20 条）→ view 拿 cid → playurl(fnval=16) 拿音轨
 //   → 音轨最高 30280（FLAC 184k），30232（AAC 83k），30216（AAC 66k）
 // 下载需要 Referer: https://www.bilibili.com/（net/cache.rs 按域注入），
