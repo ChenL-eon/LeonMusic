@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 设置：外观 / 桌面歌词 / 播放 / 音源插件 / 存储 / 关于。 */
+/** 设置：外观 / 桌面歌词 / 播放 / 音源插件 / 流媒体 / 关于。 */
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import BrandLogo from "@/components/BrandLogo.vue";
@@ -12,7 +12,7 @@ import {
   settings as settingsApi,
 } from "@/api/ipc";
 import type { AudioDiag, PluginInfo } from "@/types";
-import { useSettingsStore } from "@/stores/settings";
+import { STREAM_PLUGIN_IDS, useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 
 const store = useSettingsStore();
@@ -213,6 +213,67 @@ watch(
 const s = computed(() => store.value);
 const cacheMb = computed(() => (store.cacheBytes / 1024 / 1024).toFixed(1));
 
+/** 自建流媒体服务（Emby / Jellyfin / Navidrome）与其它音源插件分开两处展示：
+ *  「音源插件」页只留公共音源，这三家单独一个页签，默认收起。 */
+const streamPlugins = computed(() =>
+  store.pluginList.filter((p) =>
+    (STREAM_PLUGIN_IDS as readonly string[]).includes(p.manifest.id),
+  ),
+);
+const sourcePlugins = computed(() =>
+  store.pluginList.filter(
+    (p) => !(STREAM_PLUGIN_IDS as readonly string[]).includes(p.manifest.id),
+  ),
+);
+
+/** 数字输入框：失焦 / 回车 / 点上下箭头时收敛到区间内再写库。
+ *  空值不写 0 —— 用户清空准备重输时，`Number("")` 会把字号变成 0。 */
+function setNumber(
+  key: "lyricFontSize" | "nowBgBlur",
+  e: Event,
+  min: number,
+  max: number,
+): void {
+  const el = e.target as HTMLInputElement;
+  const raw = el.value.trim();
+  if (!raw) {
+    el.value = String(s.value[key]);
+    return;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    el.value = String(s.value[key]);
+    return;
+  }
+  const clamped = Math.min(max, Math.max(min, Math.round(n)));
+  el.value = String(clamped);
+  void set(key, clamped);
+}
+
+/** 必填项齐全 = 这个自建服务真的能用（搜索页用同一套判定给音源排序）。 */
+function isConfigured(p: PluginInfo): boolean {
+  return p.manifest.config
+    .filter((f) => f.required)
+    .every((f) => (p.config[f.key] ?? "").trim().length > 0);
+}
+
+/** 流媒体总开关：开=展开面板，关=收起并真的停掉三个插件。
+ *  插件在库里默认是「启用」的，只藏 UI 不改状态，搜索页照样能选到它们。
+ *  打开时只启用「必填项已填全」的服务：三个都没配就全开，
+ *  用户点搜索只会收到「未配置服务器地址」。 */
+async function toggleStream(on: boolean) {
+  await store.save({ streamEnabled: on });
+  if (!on) {
+    await store.syncStreamPlugins(false);
+  } else {
+    for (const p of streamPlugins.value) {
+      const want = isConfigured(p);
+      if (p.enabled !== want) await store.setPluginEnabled(p.manifest.id, want);
+    }
+  }
+  ui.toast(on ? "流媒体已启用" : "流媒体已关闭", "success");
+}
+
 const accents = [
   "#7c5cff",
   "#3dd6d0",
@@ -318,6 +379,14 @@ async function savePlugin(id: string) {
   try {
     await store.setPluginConfig(id, pluginDraft[id] ?? {});
     ui.toast("插件配置已保存", "success");
+    // 流媒体页：填全必填项就顺手启用，省得用户再回上面找开关。
+    if (
+      s.value.streamEnabled &&
+      (STREAM_PLUGIN_IDS as readonly string[]).includes(id)
+    ) {
+      const p = store.pluginList.find((x) => x.manifest.id === id);
+      if (p && !p.enabled && isConfigured(p)) await store.setPluginEnabled(id, true);
+    }
   } catch (e) {
     ui.toast(errorText(e), "error");
   }
@@ -491,6 +560,7 @@ function goDownload() {
         <button v-if="!store.isAndroid" :class="{ on: tab === 'lyric' }" @click="tab = 'lyric'">桌面歌词</button>
         <button :class="{ on: tab === 'play' }" @click="tab = 'play'">播放</button>
         <button :class="{ on: tab === 'source' }" @click="tab = 'source'">音源插件</button>
+        <button :class="{ on: tab === 'stream' }" @click="tab = 'stream'">流媒体</button>
         <button :class="{ on: tab === 'about' }" @click="tab = 'about'">更新与关于</button>
       </nav>
 
@@ -534,16 +604,19 @@ function goDownload() {
           <div class="row">
             <div class="label">
               <div>歌词字号</div>
-              <div class="desc">{{ s.lyricFontSize }} px</div>
+              <div class="desc">播放页歌词的基准字号，20 – 56</div>
             </div>
-            <input
-              type="range"
-              min="20"
-              max="56"
-              step="1"
-              :value="s.lyricFontSize"
-              @change="set('lyricFontSize', Number(($event.target as HTMLInputElement).value))"
-            />
+            <div class="num-field">
+              <input
+                type="number"
+                min="20"
+                max="56"
+                step="1"
+                :value="s.lyricFontSize"
+                @change="setNumber('lyricFontSize', $event, 20, 56)"
+              />
+              <span class="unit">px</span>
+            </div>
           </div>
 
           <div class="row">
@@ -759,21 +832,6 @@ function goDownload() {
         <section v-else-if="tab === 'play'" class="group">
           <div class="row">
             <div class="label">
-              <div>音量</div>
-              <div class="desc">{{ Math.round(s.volume * 100) }}%</div>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              :value="s.volume"
-              @change="set('volume', Number(($event.target as HTMLInputElement).value))"
-            />
-          </div>
-
-          <div class="row">
-            <div class="label">
               <div>输出采样率</div>
               <div class="desc">引擎固定 48kHz，源文件自动重采样</div>
             </div>
@@ -804,16 +862,16 @@ function goDownload() {
               <div>背景模糊</div>
               <div class="desc">数值越大越柔和，0 为不模糊</div>
             </div>
-            <div class="inline">
+            <div class="num-field">
               <input
-                type="range"
+                type="number"
                 min="0"
                 max="100"
                 step="1"
                 :value="s.nowBgBlur"
-                @input="set('nowBgBlur', Number(($event.target as HTMLInputElement).value))"
+                @change="setNumber('nowBgBlur', $event, 0, 100)"
               />
-              <span class="mono muted">{{ s.nowBgBlur }}px</span>
+              <span class="unit">px</span>
             </div>
           </div>
 
@@ -991,7 +1049,7 @@ function goDownload() {
             </div>
           </div>
 
-          <div v-for="p in store.pluginList" :key="p.manifest.id" class="plugin card">
+          <div v-for="p in sourcePlugins" :key="p.manifest.id" class="plugin card">
             <div class="plugin-head">
               <div class="plugin-title">
                 <Icon name="plug" :size="17" />
@@ -1039,10 +1097,106 @@ function goDownload() {
             </div>
           </div>
 
-          <div v-if="!store.pluginList.length" class="empty">
+          <div v-if="!sourcePlugins.length" class="empty">
             <div class="big">🔌</div>
             <div>还没有插件</div>
           </div>
+
+          <p class="plugins-foot">
+            Emby / Jellyfin / Navidrome 等自建服务已移到
+            <button class="link-btn" @click="tab = 'stream'">「流媒体」页</button>，
+            那里统一开关，默认关闭。
+          </p>
+        </section>
+
+        <!-- 流媒体：自建 Emby / Jellyfin / Navidrome。
+             默认关闭并收起配置，打开总开关才展开 —— 三个服务大多用不到，
+             常驻三张空配置卡只会把音源页撑长。 -->
+        <section v-else-if="tab === 'stream'" class="group">
+          <div class="row">
+            <div class="label">
+              <div>启用流媒体</div>
+              <div class="desc">
+                接入你自己的媒体服务器，把自建曲库当作在线音源；请求直连服务器，不经第三方
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="s.streamEnabled"
+                @change="toggleStream(($event.target as HTMLInputElement).checked)"
+              />
+              <span />
+            </label>
+          </div>
+
+          <div v-if="!s.streamEnabled" class="stream-off card">
+            <div class="stream-brands">
+              <span v-for="name in ['Emby', 'Jellyfin', 'Navidrome']" :key="name">{{ name }}</span>
+            </div>
+            <p class="desc">
+              默认关闭，配置项已收起。启用后在这里填写服务器地址与凭据，三个服务互不影响，
+              只开你在用的那个；填全必填项并保存即自动启用。
+            </p>
+          </div>
+
+          <template v-else>
+            <div v-for="p in streamPlugins" :key="p.manifest.id" class="plugin card">
+              <div class="plugin-head">
+                <div class="plugin-title">
+                  <Icon name="plug" :size="17" />
+                  <strong>{{ p.manifest.name }}</strong>
+                  <span class="badge" :class="{ ok: p.enabled }">
+                    {{ p.enabled ? "已启用" : isConfigured(p) ? "已配置" : "待配置" }}
+                  </span>
+                </div>
+                <label class="switch">
+                  <input
+                    type="checkbox"
+                    :checked="p.enabled"
+                    @change="togglePlugin(p.manifest.id, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <span />
+                </label>
+              </div>
+              <p class="plugin-desc">{{ p.manifest.description }}</p>
+
+              <div v-if="configFields(p).length && pluginDraft[p.manifest.id]" class="fields">
+                <div v-for="f in configFields(p)" :key="f.key" class="field">
+                  <label>{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+                  <div v-if="f.fieldType === 'boolean'" class="bool-row">
+                    <label class="switch">
+                      <input
+                        type="checkbox"
+                        :checked="pluginDraft[p.manifest.id][f.key] !== 'off'"
+                        @change="
+                          pluginDraft[p.manifest.id][f.key] = (
+                            $event.target as HTMLInputElement
+                          ).checked
+                            ? 'on'
+                            : 'off'
+                        "
+                      />
+                      <span />
+                    </label>
+                    <span class="bool-hint">{{ f.placeholder }}</span>
+                  </div>
+                  <input
+                    v-else
+                    v-model="pluginDraft[p.manifest.id][f.key]"
+                    :placeholder="f.placeholder ?? ''"
+                    :type="f.fieldType === 'password' ? 'password' : 'text'"
+                    spellcheck="false"
+                  />
+                </div>
+                <button class="btn primary" @click="savePlugin(p.manifest.id)">保存配置</button>
+              </div>
+            </div>
+
+            <p v-if="!streamPlugins.length" class="empty">
+              没有找到内置的 Emby / Jellyfin / Navidrome 插件
+            </p>
+          </template>
         </section>
 
         <!-- 更新与关于 -->
@@ -1450,6 +1604,45 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 13px;
 }
 
+/* 数字步进输入：浅灰底、无边框，值居中，右侧用浏览器原生上下箭头。
+   替代原来的滑条 —— 字号 / 模糊半径这类精确值，拖动很难停到想要的那个数。 */
+.num-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 8px 0 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: var(--panel-3);
+  transition: border-color 0.15s, background 0.15s;
+}
+.num-field:hover {
+  background: var(--panel-2);
+}
+.num-field:focus-within {
+  border-color: var(--accent);
+  background: var(--panel);
+}
+.num-field input {
+  width: 62px;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  padding: 0;
+}
+.num-field .unit {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-right: 2px;
+}
+
 .plugins-head {
   display: flex;
   align-items: center;
@@ -1484,6 +1677,49 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--panel-3);
   color: var(--text-2);
   font-weight: 400;
+}
+.badge.ok {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+/* 流媒体默认关闭时的占位卡：只列服务名 + 一句说明，不渲染任何输入框 */
+.stream-off {
+  padding: 16px 18px;
+  margin-bottom: 10px;
+}
+.stream-brands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.stream-brands span {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+}
+.stream-off .desc {
+  margin: 0;
+}
+.plugins-foot {
+  font-size: 11.5px;
+  color: var(--text-3);
+  line-height: 1.7;
+  padding: 6px 4px 0;
+}
+.link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
 }
 .plugin-desc {
   font-size: 12px;

@@ -35,9 +35,14 @@ const DEFAULTS: Settings = {
   dlColorLyric: "#ffffff",
   dlColorTrans: "#ffffff",
   dlAlwaysOnTop: true,
+  streamEnabled: false,
   cacheLimitMb: 2048,
   crossfadeMs: 0,
 };
+
+/** 自建流媒体服务的插件 id：由设置页「流媒体」总开关统一启停。
+ *  设置页按这一组 id 过滤渲染，不散落在各处写字符串。 */
+export const STREAM_PLUGIN_IDS = ["emby", "jellyfin", "navidrome"] as const;
 
 export const useSettingsStore = defineStore("settings", () => {
   const value = ref<Settings>({ ...DEFAULTS });
@@ -111,6 +116,9 @@ export const useSettingsStore = defineStore("settings", () => {
     platform.value = p;
     applyTheme();
     await reloadPlugins();
+    // 流媒体默认关闭：插件行在库里默认是「启用」，这里对齐一次。
+    // 否则会出现「设置页显示关着、搜索页却还能选到自建服务」的错位。
+    if (!value.value.streamEnabled) await syncStreamPlugins(false);
     loaded.value = true;
     void refreshCacheSize();
 
@@ -136,6 +144,21 @@ export const useSettingsStore = defineStore("settings", () => {
   async function setPluginEnabled(id: string, enabled: boolean) {
     await pluginApi.setEnabled(id, enabled);
     await reloadPlugins();
+  }
+
+  /** 把三个自建服务插件的启停对齐到「流媒体」总开关。
+   *  总开关关闭时必须真的停用插件 —— 只把设置页的配置块收起来，
+   *  插件照样在搜索页可选，等于假关闭。 */
+  async function syncStreamPlugins(enabled: boolean) {
+    let dirty = false;
+    for (const id of STREAM_PLUGIN_IDS) {
+      const p = pluginList.value.find((x) => x.manifest.id === id);
+      if (p && p.enabled !== enabled) {
+        await pluginApi.setEnabled(id, enabled);
+        dirty = true;
+      }
+    }
+    if (dirty) await reloadPlugins();
   }
 
   async function setPluginConfig(id: string, config: Record<string, string>) {
@@ -165,6 +188,7 @@ export const useSettingsStore = defineStore("settings", () => {
     reloadPlugins,
     setPluginEnabled,
     setPluginConfig,
+    syncStreamPlugins,
     refreshCacheSize,
     clearCache,
     applyTheme,

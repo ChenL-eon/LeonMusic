@@ -287,6 +287,8 @@ export interface Settings {
   dlColorTrans: string;
   /** 桌面歌词：窗口置顶 */
   dlAlwaysOnTop: boolean;
+  /** 「流媒体」板块总开关：默认关闭，关闭时隐藏配置并停用三个自建服务插件 */
+  streamEnabled: boolean;
   cacheLimitMb: number;
   crossfadeMs: number;
 }

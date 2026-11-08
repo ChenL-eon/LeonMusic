@@ -725,6 +725,8 @@ pub struct Settings {
     pub dl_color_trans: String,
     /// 桌面歌词：窗口是否置顶。
     pub dl_always_on_top: bool,
+    /// 「流媒体」板块总开关：关闭时设置页收起配置，并停用 Emby/Jellyfin/Navidrome。
+    pub stream_enabled: bool,
     pub cache_limit_mb: u64,
     pub crossfade_ms: u32,
 }
@@ -756,6 +758,7 @@ impl Default for Settings {
             dl_color_lyric: "#ffffff".into(),
             dl_color_trans: "#ffffff".into(),
             dl_always_on_top: true,
+            stream_enabled: false,
             cache_limit_mb: 2048,
             crossfade_ms: 0,
         }

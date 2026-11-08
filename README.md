@@ -106,6 +106,7 @@ LeonMusic 是一个「前端只做遥控器」的音乐播放器：WebView 被�
 - 插件协议 API v1：`manifest.json + index.js`，改完即生效
 - 宿主注入 `leon.http` / `leon.crypto`（AES/RSA/摘要）等能力，JS 沙箱有指令数与递归深度上限
 - 内置：网易云（登录 / 解析 / 打卡）、Navidrome、Jellyfin、Emby
+- 自建服务（Navidrome / Jellyfin / Emby）收在设置页「流媒体」独立页签，默认关闭并收起配置，开启后才展开
 - 插件开发说明见[开发文档](docs/DEVELOPMENT.md)
 
 ## ❓ 常见问题

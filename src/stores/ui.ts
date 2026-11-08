@@ -15,7 +15,7 @@ export type Page =
   | "settings";
 
 /** 设置页的分页。放在 store 里，「去配置」才能从别的页面直达指定页签。 */
-export type SettingsTab = "look" | "lyric" | "play" | "source" | "about";
+export type SettingsTab = "look" | "lyric" | "play" | "source" | "stream" | "about";
 
 export interface Toast {
   id: number;
