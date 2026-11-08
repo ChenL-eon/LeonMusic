@@ -45,18 +45,28 @@ export const useLibraryStore = defineStore("library", () => {
   let initPromise: Promise<void> | null = null;
 
   function init() {
-    if (!initPromise) initPromise = doInit();
+    if (!initPromise) {
+      initPromise = doInit().catch((e) => {
+        // 启动时一次 IPC 失败不该把整条初始化永久钉死：释放缓存，
+        // 页面重新挂载时还能再试一次（否则之后所有 init 都拿到同一个拒绝）。
+        initPromise = null;
+        throw e;
+      });
+    }
     return initPromise;
   }
 
   async function doInit() {
+    // 先订阅、再拉数据：即使首次读取失败，后面的扫描 / 导入事件也不会丢。
+    if (!unlisteners.length) {
+      unlisteners.push(
+        await on(EVT.libraryChanged, () => void refresh()),
+        await on<{ done: number; total: number }>(EVT.scanProgress, (p) => {
+          scanProgress.value = p;
+        }),
+      );
+    }
     await refresh();
-    unlisteners.push(
-      await on(EVT.libraryChanged, () => void refresh()),
-      await on<{ done: number; total: number }>(EVT.scanProgress, (p) => {
-        scanProgress.value = p;
-      }),
-    );
   }
 
   async function refresh() {
