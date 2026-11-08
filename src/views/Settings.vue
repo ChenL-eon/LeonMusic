@@ -226,7 +226,7 @@ const sourcePlugins = computed(() =>
   ),
 );
 
-/** 数字输入框：失焦 / 回车 / 点上下箭头时收敛到区间内再写库。
+/** 数字输入框：失焦 / 回车时收敛到区间内再写库。
  *  空值不写 0 —— 用户清空准备重输时，`Number("")` 会把字号变成 0。 */
 function setNumber(
   key: "lyricFontSize" | "nowBgBlur",
@@ -248,6 +248,17 @@ function setNumber(
   const clamped = Math.min(max, Math.max(min, Math.round(n)));
   el.value = String(clamped);
   void set(key, clamped);
+}
+
+/** 上下箭头 / 方向键：±1 并夹在区间内，不用再走一次输入校验。 */
+function bump(
+  key: "lyricFontSize" | "nowBgBlur",
+  delta: number,
+  min: number,
+  max: number,
+): void {
+  const next = Math.min(max, Math.max(min, (Number(s.value[key]) || 0) + delta));
+  if (next !== s.value[key]) void set(key, next);
 }
 
 /** 必填项齐全 = 这个自建服务真的能用（搜索页用同一套判定给音源排序）。 */
@@ -604,18 +615,36 @@ function goDownload() {
           <div class="row">
             <div class="label">
               <div>歌词字号</div>
-              <div class="desc">播放页歌词的基准字号，20 – 56</div>
+              <div class="desc">播放页歌词的基准字号，20 – 56 px</div>
             </div>
             <div class="num-field">
               <input
-                type="number"
-                min="20"
-                max="56"
-                step="1"
+                type="text"
+                inputmode="numeric"
+                spellcheck="false"
                 :value="s.lyricFontSize"
                 @change="setNumber('lyricFontSize', $event, 20, 56)"
+                @keydown.up.prevent="bump('lyricFontSize', 1, 20, 56)"
+                @keydown.down.prevent="bump('lyricFontSize', -1, 20, 56)"
               />
-              <span class="unit">px</span>
+              <span class="steppers">
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-label="增大"
+                  @click="bump('lyricFontSize', 1, 20, 56)"
+                >
+                  <svg viewBox="0 0 8 5" aria-hidden="true"><path d="M4 0L8 5H0z" fill="currentColor" /></svg>
+                </button>
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-label="减小"
+                  @click="bump('lyricFontSize', -1, 20, 56)"
+                >
+                  <svg viewBox="0 0 8 5" aria-hidden="true"><path d="M0 0h8L4 5z" fill="currentColor" /></svg>
+                </button>
+              </span>
             </div>
           </div>
 
@@ -860,18 +889,36 @@ function goDownload() {
           <div v-if="!store.isAndroid" class="row">
             <div class="label">
               <div>背景模糊</div>
-              <div class="desc">数值越大越柔和，0 为不模糊</div>
+              <div class="desc">播放页封面背景的模糊半径，0 – 100 px</div>
             </div>
             <div class="num-field">
               <input
-                type="number"
-                min="0"
-                max="100"
-                step="1"
+                type="text"
+                inputmode="numeric"
+                spellcheck="false"
                 :value="s.nowBgBlur"
                 @change="setNumber('nowBgBlur', $event, 0, 100)"
+                @keydown.up.prevent="bump('nowBgBlur', 1, 0, 100)"
+                @keydown.down.prevent="bump('nowBgBlur', -1, 0, 100)"
               />
-              <span class="unit">px</span>
+              <span class="steppers">
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-label="增大"
+                  @click="bump('nowBgBlur', 1, 0, 100)"
+                >
+                  <svg viewBox="0 0 8 5" aria-hidden="true"><path d="M4 0L8 5H0z" fill="currentColor" /></svg>
+                </button>
+                <button
+                  type="button"
+                  tabindex="-1"
+                  aria-label="减小"
+                  @click="bump('nowBgBlur', -1, 0, 100)"
+                >
+                  <svg viewBox="0 0 8 5" aria-hidden="true"><path d="M0 0h8L4 5z" fill="currentColor" /></svg>
+                </button>
+              </span>
             </div>
           </div>
 
@@ -1604,14 +1651,16 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 13px;
 }
 
-/* 数字步进输入：浅灰底、无边框，值居中，右侧用浏览器原生上下箭头。
-   替代原来的滑条 —— 字号 / 模糊半径这类精确值，拖动很难停到想要的那个数。 */
+/* 数字步进输入：浅灰底、无边框，值靠右，右侧自绘上下箭头。
+   替代滑条 —— 字号 / 模糊半径这类精确值，拖动很难停到想要的那个数。
+   箭头不用 `input[type=number]` 的原生 spinner：Chromium 只在悬停时显示，
+   离开鼠标就消失，看起来像个不能点的普通数字。 */
 .num-field {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   height: 36px;
-  padding: 0 8px 0 12px;
+  padding: 0 6px 0 12px;
   border-radius: 9px;
   border: 1px solid transparent;
   background: var(--panel-3);
@@ -1625,7 +1674,7 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--panel);
 }
 .num-field input {
-  width: 62px;
+  width: 54px;
   height: 100%;
   border: 0;
   outline: none;
@@ -1637,10 +1686,31 @@ input[type="range"]::-webkit-slider-thumb {
   text-align: right;
   padding: 0;
 }
-.num-field .unit {
-  font-size: 11.5px;
-  color: var(--text-3);
-  margin-right: 2px;
+.steppers {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.steppers button {
+  width: 20px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.steppers button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.steppers svg {
+  width: 8px;
+  height: 5px;
+  display: block;
 }
 
 .plugins-head {
