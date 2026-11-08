@@ -2100,18 +2100,19 @@ input[type="range"]::-webkit-slider-thumb {
     width: 30px;
     height: 30px;
   }
-  /* 数字步进框：桌面是紧凑的 inline 控件，整行摊开后数字缩在左边、
-     右侧空出一大片，看着像没填完的表单。手机上改成「值靠左、箭头贴右」，
-     并把点击区放大到手指能稳稳点中的尺寸。 */
+  /* 数字步进框：手机上不能跟着 .row 拉满整行 —— 数字贴最左、箭头贴最右，
+     中间几百像素空白会让它看起来像两个不相干的控件。保持紧凑、贴着标题左侧，
+     只把高度和点击区放大到手指好点的尺寸。 */
   .num-field {
-    width: 100%;
+    width: auto;
+    align-self: flex-start;
     height: 44px;
     padding: 0 8px 0 14px;
   }
   .num-field input {
-    flex: 1;
-    width: auto;
-    text-align: left;
+    flex: none;
+    width: 46px;
+    text-align: right;
     font-size: 16px;
   }
   .steppers {
@@ -2122,8 +2123,8 @@ input[type="range"]::-webkit-slider-thumb {
     border-left: 1px solid var(--border);
   }
   .steppers button {
-    width: 36px;
-    height: 30px;
+    width: 32px;
+    height: 34px;
   }
   .steppers svg {
     width: 10px;
@@ -2179,6 +2180,7 @@ input[type="range"]::-webkit-slider-thumb {
   /* 横屏又回到「标题在左、控件在右」，步进框跟着收回紧凑样式 */
   .num-field {
     width: auto;
+    align-self: center;
     height: 36px;
     padding: 0 6px 0 12px;
   }
