@@ -905,6 +905,15 @@ VIP 曲的解码/解析/输出全链路实测都正常（会话峰值 0.19–0.6
 `player_audio_reset`（重开输出流并从当前位置续播），并把播放条音量写回数据库。
 设置 → 播放 里点「刷新」即可自查，音量 0 时播放条也会显示「已静音」。
 
+**「智能音质」为什么要放 Rust 侧做？**
+播放失败发生在引擎线程（`Session::open` 探测失败 / 建流失败），前端只收到一条
+错误 toast，拿不到「该降哪一档」。所以引擎只负责判断「还能不能再降」并发
+`EVT_PLAY_FAILED`（payload 里 `qualityHint` 已是下一档），由 `resolve_and_play`
+重新解析、起播。降级链 `lossless → exhigh → higher → standard` 有上限，降到最低档
+仍失败才写 `PlaybackStatus::Error`；关掉设置就退化成「只试一次」的旧行为。
+插件侧用 `track.qualityHint` 覆盖本次实际请求档位，但仍按用户选择的档位标记
+`requested / downgraded` —— 自动降级不能把界面骗成「无损成功」。
+
 **为什么变速变调用「WSOLA + 重采样」两级？**
 WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重采样
 （同时改音高与时长），合成后音高 ×P、速度 ×S，两者解耦。
@@ -962,6 +971,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | 坏缓存防护（本次） | `cargo test --lib` + 桌面缓存实扫 | ✅ 落盘前按魔数校验（ID3 / fLaC / OggS / RIFF / ftyp / MP3 帧同步 / ASF）：`.part` 大小等于 Content-Length 但内容不是音频时**只跳过缓存**，播放不受影响；打开缓存失败时只删除 media 缓存目录内的文件并清库记录，用户本地音乐不碰。测试：HTML 正文（长度精确匹配）不落盘且 `.part` 被清理、魔数表 flac/id3/帧同步/m4a/wav/html/json/空。桌面缓存目录现存 4 文件 154.9 MB 全为音频，无历史坏文件。51 passed / 0 failed |
 | 启动不再等曲库（本次） | `npm run build` + `build/mock_tauri.js`（可延迟指定 IPC）+ 无头 Edge 390×844 / 1280×800 | ✅ 曲库 IPC 延迟 2000ms：300ms 时首页已渲染、6 行骨架（52px 封面与真实行同尺寸，填充不跳动）、全程无启动遮罩；2s 后骨架消失、8 行真实曲目。延迟 0：`bootSpinner` 从未出现。播放器快照延迟 600ms：320ms 时显示 spinner「正在启动…」，1300ms 后首页就绪。桌面 1280 宽：侧栏/播放条正常，仅主区居中 spinner。首屏只等 `settings`+`player`（4 个 IPC），曲库与播放器并行且不阻塞渲染 |
 | 播放按钮图标居中（本次） | `npm run build` + 无头 Edge 390×844 dpr3（把 path 换成 pause-f 后量几何） | ✅ 根因是 `class="ctrl main"` 撞上全局 `.main { padding: 16px 14px 6px }`（<860px 生效），grid 内容区被压得下移 5px；改 `.primary` + `.ctrl{padding:0}` 后 svg 中心 = 按钮中心、双条 bbox 中心 = 按钮中心（delta 0,0）；`pause-f` 同时右移 0.5 单位，几何中心落回 viewBox 的 12 |
+| 智能音质 / 移动端设置微调（本次） | `npm run typecheck` + `npm run build` + 无头 Edge 390×844 / 1180×820（假 Tauri 宿主）+ `node build/test_resolve_chain.cjs` + `cargo test --lib` | ✅ 移动端「外观」页不再渲染主色色板（桌面端保留）；歌词字号步进框从「数字挤在左侧、右边一片空白」改为值靠左、箭头贴右并加分隔线，高度 44px（横屏回退紧凑样式）；「播放」页首行新增智能音质开关（默认开启）。后端：`Track.qualityHint` 只在降级重试时出现，`smart_next_level` 逐档下降并在最低档返回 None；`EVT_PLAY_FAILED` → `resolve_and_play` 重解析，解析失败也继续降档；失败终态补写 `PlaybackStatus::Error`（不再永远停在 Buffering）；异步解析前后都校验队列当前项，用户中途切歌时丢弃过期结果，不会被拽回上一首。插件 2.21.0；JS 40 passed / Rust 53 passed |
 | 官方 320k 时仍取 FLAC（本次） | 真实联网 `getStreamUrl` + `node build/test_resolve_chain.cjs` | ✅ 根因：官方 eapi 给「非试听 320k」时旧逻辑直接 return，第三方链从未被问；《水之湄》实测酷我 BD 稳定给 2000k FLAC（连测 6 次 900）。改后 `getStreamUrl` 返回 `source=resolved / format=flac / bitrate=900000 / downgraded=false`；解析只到 320/128 时保留官方链接；官方给 FLAC 时零解析请求。插件 2.20.0，单测 37 passed / 0 failed，Rust 51 passed |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
@@ -971,7 +981,9 @@ AES-CBC / AES-ECB / RSA-NoPadding 与 Node `crypto` 逐字节对齐、
 内置插件脚本入口、试听片段判定与解析开关语义、内置插件版本比较、
 扫码风控状态码映射（801/802/800/8821/设备环境异常 → blocked）、
 会话 Cookie 合并去重、音质档位降级顺序（六档 + 非法值回落 exhigh）、
-档位→解析码率映射、直链格式推断、官方静默降级与逐档降级的 `downgraded` 判定。
+档位→解析码率映射、直链格式推断、官方静默降级与逐档降级的 `downgraded` 判定、
+智能音质降级链（lossless→exhigh→higher→standard，到底返回 None）、
+`qualityHint` 出现时按该档请求且不再为 FLAC 追问第三方。
 
 **桌面端实测**（CDP 真实驱动 UI + IPC，非纸面推演）：启动无 panic、SMTC ready、
 托盘与隐藏歌词窗就位；扫描 3 首 WAV → 标签解析正确；点行播放、暂停、上一首、
