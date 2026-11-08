@@ -174,15 +174,9 @@ class PlaybackService : Service() {
         // 换歌先清封面，避免新歌配旧图
         coverBitmap = null
 
-        session.setMetadata(
-            MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
-                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
-                .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, trackId)
-                .build()
-        )
+        // 先推一次无封面的元数据（锁屏/各品牌胶囊立刻能显示文字与进度），
+        // 封面解码完成后再单独补推一次（见 loadCover）。
+        session.setMetadata(buildMetadata(null))
 
         pushState()
         notifyNow()
@@ -280,6 +274,28 @@ class PlaybackService : Service() {
 
     private fun command(action: String) = LeonBridge.sendCommand(action)
 
+    /**
+     * 组装 MediaSession 元数据。
+     *
+     * 封面必须同时写入 `ALBUM_ART` 与 `ART`：Android 13+ 的锁屏媒体卡片、
+     * 小米超级岛 / OPPO 流体云 / vivo 原子岛 / 荣耀灵动胶囊渲染封面时读的
+     * 是 metadata 里的 art，而不是通知的 largeIcon（那只在通知栏生效）。
+     */
+    private fun buildMetadata(withCover: Bitmap?): MediaMetadataCompat =
+        MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+            .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, trackId)
+            .apply {
+                if (withCover != null) {
+                    putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, withCover)
+                    putBitmap(MediaMetadataCompat.METADATA_KEY_ART, withCover)
+                }
+            }
+            .build()
+
     private val sessionCallback = object : MediaSessionCompat.Callback() {
         override fun onPlay() = command("play")
 
@@ -348,7 +364,7 @@ class PlaybackService : Service() {
         title = "未在播放"
         artist = ""
         album = ""
-        session.setMetadata(MediaMetadataCompat.Builder().build())
+        session.setMetadata(buildMetadata(null))
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(ACTIONS)
@@ -401,36 +417,31 @@ class PlaybackService : Service() {
 
     private fun buildNotification(): Notification {
         val toggleIcon =
-            if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            if (playing) R.drawable.ic_notif_pause else R.drawable.ic_notif_play
         val toggleLabel = if (playing) "暂停" else "播放"
         val subtitle = if (album.isBlank()) artist else "$artist · $album"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(smallIcon())
+            .setSmallIcon(R.drawable.ic_stat_leonmusic)
             .setContentTitle(title)
             .setContentText(subtitle)
             .setLargeIcon(coverBitmap)
             .setContentIntent(openIntent())
             .setDeleteIntent(serviceIntent(ACTION_STOP))
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setSilent(true)
-            .addAction(android.R.drawable.ic_media_previous, "上一首", serviceIntent(ACTION_PREV))
+            .addAction(R.drawable.ic_notif_prev, "上一首", serviceIntent(ACTION_PREV))
             .addAction(toggleIcon, toggleLabel, serviceIntent(ACTION_TOGGLE))
-            .addAction(android.R.drawable.ic_media_next, "下一首", serviceIntent(ACTION_NEXT))
+            .addAction(R.drawable.ic_notif_next, "下一首", serviceIntent(ACTION_NEXT))
             .setStyle(
                 MediaNotificationCompat.MediaStyle()
                     .setMediaSession(session.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
             )
             .build()
-    }
-
-    /** 通知小图标必须是单色 alpha 图：直接复用应用图标，避免额外资源依赖 */
-    private fun smallIcon(): Int {
-        val icon = applicationInfo.icon
-        return if (icon != 0) icon else android.R.drawable.ic_media_play
     }
 
     private fun notifyNow() {
@@ -481,7 +492,11 @@ class PlaybackService : Service() {
             // 解码期间用户可能已经切歌，别把旧图贴上去
             if (forTrackId != trackId) return@execute
             coverBitmap = bitmap
-            main.post { notifyNow() }
+            main.post {
+                // 封面进 metadata：锁屏卡片与厂商胶囊（超级岛/流体云等）都从这里取图
+                session.setMetadata(buildMetadata(bitmap))
+                notifyNow()
+            }
         }
     }
 
