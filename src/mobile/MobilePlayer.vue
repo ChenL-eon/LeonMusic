@@ -20,6 +20,8 @@ const { snap, track, isPlaying, lyrics, currentLineIndex, displayPosition } = st
 
 const pane = ref<0 | 1>(0);
 const fav = computed(() => library.isFav(track.value));
+/** 封面页歌词预览的第二行：当前句之后那句，纯展示不参与高亮 */
+const nextLineText = computed(() => lyrics.value.lines[currentLineIndex.value + 1]?.text ?? "");
 /** 切歌时刷新云端红心状态（网易云插件曲目；失败静默） */
 watch(track, (t) => void library.refreshCloudLiked(t), { immediate: true });
 /** 随机是独立开关：开时显示 shuffle 图标，其余按 repeat 显示 */
@@ -98,19 +100,21 @@ function onTouchEnd(e: TouchEvent) {
 
     <div class="content">
       <header class="top">
-        <button class="rnd" aria-label="收起播放页" @click="emit('close')">
-          <Icon name="chevron-down" :size="22" />
+        <button class="arrow" aria-label="收起播放页" @click="emit('close')">
+          <Icon name="chevron-down" :size="24" />
         </button>
         <div class="titles">
           <b>{{ track?.title ?? "还没有播放" }}</b>
           <small>{{ track?.artist || "从本地音乐挑一首开始" }}</small>
         </div>
-        <button class="rnd" :class="{ on: fav }" aria-label="喜欢" @click="toggleFav">
-          <Icon name="heart" :size="20" :filled="fav" />
-        </button>
-        <button class="rnd" aria-label="播放队列" @click="ui.toggleQueue()">
-          <Icon name="more" :size="18" filled />
-        </button>
+        <div class="acts">
+          <button class="rnd" :class="{ on: fav }" aria-label="喜欢" @click="toggleFav">
+            <Icon name="heart" :size="19" :filled="fav" />
+          </button>
+          <button class="rnd" aria-label="播放队列" @click="ui.toggleQueue()">
+            <Icon name="more" :size="17" filled />
+          </button>
+        </div>
       </header>
 
       <div class="pane">
@@ -118,13 +122,13 @@ function onTouchEnd(e: TouchEvent) {
           <CoverArt
             :cover-path="track?.coverPath"
             :cover-url="track?.coverUrl"
-            size="min(74vw, 320px)"
+            size="var(--cover-w)"
             radius="20px"
             class="big-cover"
           />
-          <div class="song-title">{{ track?.title ?? "还没有播放" }}</div>
           <div class="lyric-preview">
-            {{ lyrics.lines[currentLineIndex]?.text || "暂无歌词" }}
+            <p class="cur">{{ lyrics.lines[currentLineIndex]?.text || "暂无歌词" }}</p>
+            <p v-if="nextLineText" class="next">{{ nextLineText }}</p>
           </div>
         </div>
 
@@ -220,6 +224,10 @@ function onTouchEnd(e: TouchEvent) {
   background: linear-gradient(180deg, rgba(20, 20, 30, 0.42), rgba(18, 18, 26, 0.62) 55%, rgba(12, 12, 18, 0.82));
 }
 .content {
+  /* 封面宽度只用一处定义：大封面与顶部标题的左对齐都靠它，改一处两边同步。
+     70vw 与参考图的封面占比一致；上限 320px 防止平板上封面过大。 */
+  --cover-w: min(70vw, 320px);
+  --cover-x: calc((100% - var(--cover-w)) / 2);
   position: relative;
   height: 100%;
   display: flex;
@@ -228,6 +236,31 @@ function onTouchEnd(e: TouchEvent) {
   box-sizing: border-box;
 }
 .top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-height: 46px;
+}
+/* 收起箭头不带圆形底：参考图里它只是一个贴左的图标 */
+.arrow {
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: #fff;
+  background: transparent;
+}
+.arrow:active {
+  background: rgba(255, 255, 255, 0.14);
+}
+.acts {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -239,26 +272,32 @@ function onTouchEnd(e: TouchEvent) {
   width: 42px;
   height: 42px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.05);
   color: #fff;
   flex: none;
 }
 .rnd.on {
   color: #ff8fa3;
+  border-color: rgba(255, 143, 163, 0.55);
 }
 .rnd.wide {
   width: auto;
   padding: 0 18px;
   font-size: 13px;
   margin-top: 14px;
+  border-color: rgba(255, 255, 255, 0.22);
 }
 .titles {
+  /* 左边缘对齐大封面：封面居中留出的空白 = (内容宽 - 封面宽) / 2。
+     百分比在 padding-left 上按 .top 的宽度解析，正好等于内容宽。 */
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  text-align: center;
+  padding-left: var(--cover-x);
+  text-align: left;
 }
 .titles b {
   font-size: 15px;
@@ -292,23 +331,28 @@ function onTouchEnd(e: TouchEvent) {
 .big-cover {
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
-.song-title {
-  font-size: 22px;
-  font-weight: 700;
-  text-align: center;
-  max-width: 90%;
+.lyric-preview {
+  /* 与封面同宽、左对齐：整页文本共用一条左基线，参考图就是这种排法 */
+  width: var(--cover-w);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  text-align: left;
+}
+.lyric-preview p {
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.lyric-preview {
-  font-size: 13px;
-  opacity: 0.72;
-  text-align: center;
-  max-width: 88%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.lyric-preview .cur {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.94);
+}
+.lyric-preview .next {
+  font-size: 13.5px;
+  color: rgba(255, 255, 255, 0.55);
 }
 .lyric-pane {
   width: 100%;
@@ -316,7 +360,8 @@ function onTouchEnd(e: TouchEvent) {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 8px 4px;
+  /* 左边距与封面页共用同一条基线，切到歌词页时标题不会「跳一下」 */
+  padding: 8px 4px 8px var(--cover-x);
   display: flex;
   flex-direction: column;
   align-items: stretch;
