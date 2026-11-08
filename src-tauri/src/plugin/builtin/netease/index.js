@@ -859,7 +859,52 @@ function search(keyword, page, limit) {
   return out;
 }
 
+/** QQ 音乐导入曲目的开播：QQ 侧拿不到直链，按歌名 + 歌手走第三方解析链。
+ *  与网易云受限曲目同一条链（酷我 BD 领头、咪咕补位），区别有两个：
+ *  GD 用不了——它按网易云 id 取链，`qq:` 曲目没有这个 id；
+ *  没有官方试听可回落，两源都空就直接报错，让 UI 明确提示而不是放 30 秒。 */
+function qqStream(track) {
+  if (!unblockOn()) {
+    throw new Error('QQ 音乐曲目要靠「受限歌曲解析」取直链，请先在插件设置里打开');
+  }
+  var want = leon.config.get('level') || 'exhigh';
+  var hint = track && track.qualityHint ? String(track.qualityHint) : '';
+  var attempt = hint || want;
+  var br = hint ? brForLevel(attempt) : unblockBr();
+
+  var backends = [bodianResolve, miguResolve];
+  var best = null;
+  for (var i = 0; i < backends.length; i++) {
+    var r = null;
+    try {
+      r = backends[i](track, br);
+    } catch (e) {
+      r = null; // 单个后端异常不能挡住下一个
+    }
+    if (!r || !r.url) continue;
+    if (qualityEnough(r.br, br)) {
+      best = r;
+      break;
+    }
+    if (!best || (Number(r.br) || 0) > (Number(best.br) || 0)) best = r;
+  }
+  if (!best) throw new Error('这首歌在酷我 / 咪咕都没有找到可用音源');
+
+  var fmt = formatFromUrl(best.url);
+  return streamResult(best.url, {
+    source: 'resolved',
+    bitrate: best.br ? Math.round(best.br * 1000) : null,
+    format: fmt,
+    trial: false,
+    requested: want,
+    downgraded:
+      (want === 'lossless' || want === 'hires' || want === 'jymaster') && fmt !== 'flac'
+  });
+}
+
 function getStreamUrl(track) {
+  // 外部歌单曲目（QQ 音乐导入）：没有官方直链，直接走第三方解析
+  if (String((track && track.id) || '').indexOf('qq:') === 0) return qqStream(track);
   var want = leon.config.get('level') || 'exhigh';
   // 智能音质降级：宿主重试时用 `qualityHint` 指定这一次实际请求的档位。
   // `want` 仍是用户选的档位，只用于 requested / downgraded —— 选的是无损，
@@ -1131,7 +1176,10 @@ function getUserPlaylists() {
  * 详情最多拿 n 首 —— 导入按 1000 首一批，超出部分提示用户分批。
  */
 function getPlaylist(id) {
-  var body = weapi({ id: String(id), n: 1000, s: 8, csrf_token: csrfToken() });
+  var sid = String(id);
+  // 外部歌单：`qq:<disstid>` 由本插件的 QQ 分支拉取，曲目 id 用前缀区分音源
+  if (sid.indexOf('qq:') === 0) return qqPlaylist(sid.slice(3));
+  var body = weapi({ id: sid, n: 1000, s: 8, csrf_token: csrfToken() });
   var data = JSON.parse(post('/weapi/v6/playlist/detail', body));
   if (data.code !== 200) throw new Error('获取歌单详情失败：' + describe(data));
   var p = data.playlist || {};
@@ -1146,6 +1194,68 @@ function getPlaylist(id) {
     name: p.name || '',
     coverUrl: httpsUrl(p.coverImgUrl || ''),
     trackCount: p.trackCount || (p.trackIds && p.trackIds.length) || tracks.length,
+    tracks: tracks
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 外部歌单导入（QQ 音乐）
+// ---------------------------------------------------------------------------
+//
+// 2026-11-09 实测：`fcg_ucc_getcdinfo_byids_cp.fcg` 匿名可读公开歌单，
+// 带 `Referer: https://y.qq.com/portal/playlist.html` 就能拿到歌单名、
+// 封面与全量曲目（songname / singer / albumname / interval / songmid），
+// 不需要登录，也不会往任何账号写东西——导入只落本地库。
+//
+// 播放侧拿不到 QQ 的 vkey（匿名 uin=0 被服务端判 500003/860100001），
+// 所以曲目 id 记成 `qq:<songmid>`，开播时按「歌名 + 歌手」去酷我 BD /
+// 咪咕找直链，与网易云受限曲目走的是同一条解析链。
+
+var QQ_DISS_API =
+  'https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg';
+
+function qqPlaylist(disstid) {
+  var url =
+    QQ_DISS_API +
+    '?type=1&json=1&onlysong=0&disstid=' + encodeURIComponent(disstid) +
+    '&format=json&g_tk=5381&loginUin=0&hostUin=0&inCharset=GB2312' +
+    '&outCharset=utf-8&notice=0&platform=yqq&needNewCode=0';
+  var res = leon.http.getEx(url, {
+    Referer: 'https://y.qq.com/portal/playlist.html',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
+  });
+  var data = JSON.parse((res && res.body) || '{}');
+  if (Number(data.code) !== 0) {
+    throw new Error('QQ 音乐歌单接口返回异常：code ' + data.code);
+  }
+  var cd = (data.cdlist || [])[0];
+  if (!cd) {
+    throw new Error('没拿到 QQ 音乐歌单：链接可能指向私密歌单，或该歌单已删除');
+  }
+
+  var songs = cd.songlist || [];
+  var tracks = [];
+  for (var i = 0; i < songs.length; i++) {
+    var s = songs[i] || {};
+    var mid = s.songmid || s.mid || '';
+    if (!mid) continue;
+    tracks.push({
+      id: 'qq:' + mid,
+      title: s.songname || s.name || '',
+      artist: artistNames(s.singer),
+      album: s.albumname || (s.album && s.album.name) || '',
+      durationMs: (Number(s.interval) || 0) * 1000,
+      // 歌单接口不回单曲封面；宿主会退回歌单封面，这里留空免一次请求
+      coverUrl: ''
+    });
+  }
+  if (!tracks.length) throw new Error('QQ 音乐歌单里没有可导入的曲目');
+  return {
+    id: 'qq:' + disstid,
+    name: cd.dissname || ('QQ 音乐歌单 ' + disstid),
+    coverUrl: httpsUrl(cd.logo || ''),
+    trackCount: Number(cd.songnum) || tracks.length,
     tracks: tracks
   };
 }

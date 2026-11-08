@@ -14,7 +14,7 @@ import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
 import { errorText, library as libraryApi, net as netApi, playlist as playlistApi, plugins as pluginApi } from "@/api/ipc";
 import type { PluginAccount, PluginInfo, RemotePlaylistMeta } from "@/types";
-import { neteasePlaylistIdFromUrl, parsePlaylistLink } from "@/utils/playlistLink";
+import { neteasePlaylistIdFromUrl, parsePlaylistLink, qqPlaylistIdFromUrl } from "@/utils/playlistLink";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
@@ -524,8 +524,11 @@ async function importCore(pluginId: string, cloudId: string, label: string) {
 }
 
 /** 通过分享链接导入歌单。
- *  兼容常见平台的链接格式：网易云（完整链/163cn.tv 短链）直接导入；
- *  QQ 音乐 / 酷狗 / 酷我 / 咪咕 / B 站链接能识别平台，但暂无音源插件。 */
+ *  能真正导入的：网易云（完整链 / 163cn.tv 短链 / 分享文本）与 QQ 音乐
+ *  （网页链 / 分享页 / c6.y.qq.com 短链）。QQ 歌单由网易云插件的
+ *  「外部歌单」分支拉取（`qq:<disstid>`），曲目只落本地库、不写账号，
+ *  播放时按歌名 + 歌手走第三方解析链。
+ *  酷狗 / 酷我 / 咪咕 / B 站只识别平台：接口签名与风控各不相同，尚未适配。 */
 async function importFromLink(pluginId: string) {
   const raw = linkImport.text.trim();
   if (!raw || importing.value) return;
@@ -537,31 +540,53 @@ async function importFromLink(pluginId: string) {
   linkImport.busy = true;
   try {
     // 短链：先跟随重定向拿到带 id 的完整地址，再解析一次
-    if (parsed.platform === "netease" && parsed.short && parsed.id) {
+    if (parsed.short && parsed.id) {
       const finalUrl = await netApi.resolveRedirect(parsed.id);
-      const cloudId = neteasePlaylistIdFromUrl(finalUrl);
+      const cloudId =
+        parsed.platform === "netease"
+          ? neteasePlaylistIdFromUrl(finalUrl)
+          : qqPlaylistIdFromUrl(finalUrl);
       if (!cloudId) {
-        ui.toast("短链解析失败：跳转目标里没有歌单 ID（可能是单曲或主播电台链接）", "error");
+        ui.toast("短链解析失败：跳转目标里没有歌单 ID（可能是单曲或非歌单页）", "error");
         return;
       }
       parsed = { ...parsed, short: false, id: cloudId };
     }
-    if (parsed.platform !== "netease") {
+    if (!parsed.id) {
       ui.toast(
-        `识别到 ${parsed.platformLabel} 歌单链接：还没有该平台的音源插件，目前支持网易云`,
+        parsed.platform === "netease"
+          ? "链接里没找到歌单 ID：请从网易云 App 或网页端复制完整的歌单分享链接"
+          : `链接里没找到${parsed.platformLabel}歌单 ID，请复制完整的歌单分享链接`,
+        "error",
+      );
+      return;
+    }
+
+    // 平台 → 真正取歌单的插件 + 插件侧的歌单标识
+    let targetPlugin = pluginId;
+    let cloudId: string;
+    let label: string;
+    if (parsed.platform === "netease") {
+      cloudId = parsed.id;
+      label = `网易云歌单 ${parsed.id}`;
+    } else if (parsed.platform === "qq") {
+      // QQ 歌单由网易云插件的外部歌单分支接管（解析链也在那边）
+      targetPlugin = "netease";
+      cloudId = `qq:${parsed.id}`;
+      label = `QQ 音乐歌单 ${parsed.id}`;
+    } else {
+      ui.toast(
+        `识别到${parsed.platformLabel}歌单链接：目前支持网易云与 QQ 音乐导入，这个平台还没有接通`,
         "info",
       );
       return;
     }
-    if (!parsed.id) {
-      ui.toast("链接里没找到歌单 ID：请从网易云 App 或网页端复制完整的歌单分享链接", "error");
+
+    if (importedKeys.value.has(`${targetPlugin}:${cloudId}`)) {
+      pendingImport.value = { pluginId: targetPlugin, cloudId, label };
       return;
     }
-    if (importedKeys.value.has(`${pluginId}:${parsed.id}`)) {
-      pendingImport.value = { pluginId, cloudId: parsed.id, label: `网易云歌单 ${parsed.id}` };
-      return;
-    }
-    await importCore(pluginId, parsed.id, `网易云歌单 ${parsed.id}`);
+    await importCore(targetPlugin, cloudId, label);
     linkImport.text = "";
   } catch (e) {
     ui.toast(errorText(e), "error");
@@ -682,7 +707,7 @@ onActivated(() => {
             <input
               v-model="linkImport.text"
               class="li-input"
-              placeholder="粘贴网易云歌单分享链接，如 https://music.163.com/playlist?id=…"
+              placeholder="粘贴网易云 / QQ 音乐歌单分享链接"
               spellcheck="false"
               @keyup.enter="importFromLink(p.manifest.id)"
             />
@@ -695,7 +720,7 @@ onActivated(() => {
             </button>
           </div>
           <div class="li-hint">
-            支持完整链接与 163cn.tv 短链；QQ 音乐 / 酷狗 / 酷我等分享链接能识别平台，但暂无对应音源插件。
+            支持网易云（完整链 / 163cn.tv 短链）与 QQ 音乐（网页链 / 分享页 / 短链）；只导入到本地歌单，不同步到任何账号。酷狗 / 酷我 / 咪咕 / B 站暂未适配。
           </div>
         </div>
 

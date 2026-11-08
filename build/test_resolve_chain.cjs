@@ -88,6 +88,7 @@ const factory = new Function('leon', script + `
     resolveTrack, unblockBr, miguResolve, miguSearch, miguDecrypt, miguUrl, miguProbe,
     gdCandidateMatches, normalizeName, hasVersionMark, kuwoSearch, kuwoMatch,
     bodianSign, bodianResolve, gdResolve, qualityEnough, getStreamUrl,
+    getPlaylist, qqStream,
     // 冷却与解锁位是模块级状态，用例之间要能清干净
     resetCooldown: function () {
       bodianCooldownUntil = 0;
@@ -503,6 +504,71 @@ ok(gdCalls === gdBefore,
     '降级到 320k 档后不为 FLAC 再问第三方（少一次无谓等待）');
   ok(r17 && r17.downgraded === true && r17.requested === 'lossless',
     '仍按用户选的 lossless 标记 requested / downgraded');
+}
+
+// ---- 18. 外部歌单：QQ 音乐歌单解析（qq: 前缀分支）----
+// 匿名接口返回歌单名 / 封面 / 全量曲目；曲目 id 加 qq: 前缀，
+// 与网易云曲目区分开，开播时才知道该走哪条路。
+{
+  const QQ_DISS_BODY = JSON.stringify({
+    code: 0,
+    cdlist: [{
+      disstid: 7729596131,
+      dissname: '耳机里的秘密 | 宝藏女声集合站',
+      logo: 'http://p.qpic.cn/music_cover/abc/300',
+      songnum: 2,
+      songlist: [
+        { songmid: '003Et45Q22uBOv', songname: '寻不回', singer: [{ name: '小羊阿旸' }], albumname: '寻不回', interval: 217 },
+        { songmid: '001wldka157dWs', songname: '永远在身边', singer: [{ name: '大嘴巴' }, { name: '嘉宾' }], albumname: '王元 口力口', interval: 280 },
+      ],
+    }],
+  });
+  httpHandlers = [
+    { test: (u) => u.indexOf('fcg_ucc_getcdinfo_byids_cp') >= 0, respond: () => ({ body: QQ_DISS_BODY }) },
+    { test: () => true, respond: () => ({ body: '{}' }) },
+  ];
+  httpCalls.length = 0;
+  const pl = api.getPlaylist('qq:7729596131');
+  ok(httpCalls.length === 1 && httpCalls[0].indexOf('disstid=7729596131') >= 0,
+    'getPlaylist("qq:…") 只打一次 QQ 歌单接口，不再问网易云');
+  ok(pl && pl.name === '耳机里的秘密 | 宝藏女声集合站' && pl.trackCount === 2,
+    '歌单名与总数按接口返回，不靠曲目数组长度猜');
+  ok(pl && pl.coverUrl === 'https://p.qpic.cn/music_cover/abc/300',
+    '封面 http 升级成 https（Android 明文策略会拦）');
+  ok(pl && pl.tracks.length === 2 && pl.tracks[0].id === 'qq:003Et45Q22uBOv',
+    '曲目 id = qq:<songmid>，与网易云数字 id 天然不撞');
+  ok(pl && pl.tracks[0].durationMs === 217000,
+    'interval 秒换成毫秒');
+  ok(pl && pl.tracks[1].artist === '大嘴巴 / 嘉宾',
+    '多歌手用「 / 」拼接，与网易云的展示一致');
+}
+
+// ---- 19. 外部歌单曲目开播：走酷我 / 咪咕解析链 ----
+// QQ 侧没有直链（匿名 vkey 已封），必须由解析链接管；这里只有咪咕能命中。
+{
+  api.resetCooldown();
+  config = { unblockQuality: '320' };
+  httpHandlers = miguHandlers('bin', 206);
+  httpCalls.length = 0;
+  const qqTrack = { id: 'qq:003Et45Q22uBOv', title: '淘汰', artist: '陈奕迅', durationMs: 285000 };
+  const s = api.getStreamUrl(qqTrack);
+  ok(s && s.url.indexOf('migu.cn') >= 0 && s.source === 'resolved',
+    'qq: 曲目跳过官方查询，直接由解析链拿到直链');
+  ok(!httpCalls.some((u) => u.indexOf('/eapi/song/enhance/player/url') >= 0),
+    '不向网易云查 qq: 曲目的播放地址（那边根本没有这个 id）');
+}
+
+// ---- 20. 解析开关关闭时的 QQ 曲目：明确报错，不放 30 秒试听 ----
+{
+  config = { unblock: 'off' };
+  let msg = '';
+  try {
+    api.qqStream({ id: 'qq:003Et45Q22uBOv', title: '淘汰', artist: '陈奕迅', durationMs: 285000 });
+  } catch (e) {
+    msg = String(e && e.message);
+  }
+  ok(msg.indexOf('受限歌曲解析') >= 0,
+    '关掉解析后 QQ 曲目报「需要受限歌曲解析」，而不是静默失败');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
