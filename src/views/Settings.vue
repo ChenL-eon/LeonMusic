@@ -74,7 +74,15 @@ function configDraft(p: PluginInfo): Record<string, string> {
  *  插件配置里不再暴露这些原始输入框。
  *  保存时 draft 仍是全量，所以改其它参数不会把 Cookie / 音质冲掉。 */
 function configFields(p: PluginInfo) {
-  const managed = ["cookie", "level", "unblockQuality", "unblockBackends"];
+  const managed = [
+    "cookie",
+    "level",
+    "unblockQuality",
+    "unblockBackends",
+    "ncmBase",
+    "kgapiBase",
+    "kgapiCookie",
+  ];
   return p.manifest.config.filter((f) => !managed.includes(f.key));
 }
 
@@ -207,8 +215,11 @@ function setUnblockBr(e: Event) {
 // 不会像「busy 直接 return」那样静默丢操作，也不会被 reload 回读覆盖中间态。
 // ---------------------------------------------------------------------------
 
-/** 与插件内置链一致的源元数据；数组顺序 = 默认链顺序。 */
+/** 与插件内置链一致的源元数据；数组顺序 = 默认链顺序。
+ *  自建服务（ncm/kgapi）在链头：VutronMusic 同款架构，填了地址才进链。 */
 const BACKEND_SOURCES = [
+  { id: "ncm", name: "自建网易云 API", desc: "api-enhanced 服务（VutronMusic 同款），官方直链" },
+  { id: "kgapi", name: "自建酷狗 API", desc: "KuGouMusicApi 服务，配酷狗 Cookie 可取账号权益内 VIP 曲" },
   { id: "gd", name: "GD 音乐台", desc: "社区解析，无损优先，可能限流" },
   { id: "migu", name: "咪咕音乐", desc: "免登录直链，国内直连最稳，可升无损" },
   { id: "kw", name: "酷我音乐", desc: "128k 直链，轻量兜底" },
@@ -272,6 +283,42 @@ const metingConfigured = computed(() => {
   return p ? Boolean(String(configDraft(p).baseUrl ?? "").trim()) : false;
 });
 
+const ncmConfigured = computed(() => {
+  const p = neteasePlugin.value;
+  return p ? Boolean(String(configDraft(p).ncmBase ?? "").trim()) : false;
+});
+
+const kgapiConfigured = computed(() => {
+  const p = neteasePlugin.value;
+  return p ? Boolean(String(configDraft(p).kgapiBase ?? "").trim()) : false;
+});
+
+/** 自建服务地址 / 酷狗 Cookie 的保存：与解析源开关共用同一条串行落库队列，
+ *  快速连续改动不会互相覆盖，也不会被 reload 回读冲掉中间态。 */
+function saveSvcField(key: "ncmBase" | "kgapiBase" | "kgapiCookie", e: Event) {
+  const p = neteasePlugin.value;
+  if (!p) return;
+  const el = e.target as HTMLInputElement;
+  const v = el.value.trim();
+  const cur = String(configDraft(p)[key] ?? "").trim();
+  if (v === cur) return;
+  backendPending++;
+  const run = backendPatchChain
+    .then(async () => {
+      const cur2 = neteasePlugin.value;
+      if (!cur2) return;
+      await store.setPluginConfig(cur2.manifest.id, { ...cur2.config, [key]: v });
+      const draft = pluginDraft[cur2.manifest.id];
+      if (draft) draft[key] = v;
+      ui.toast("已保存，下一首解析开始生效", "success");
+    })
+    .catch((err) => ui.toast(errorText(err), "error"))
+    .finally(() => {
+      backendPending--;
+    });
+  backendPatchChain = run;
+}
+
 function serializeBackends(): string {
   const seq = backendSeq.value ?? [];
   if (seq.length === 0) return "off";
@@ -315,7 +362,8 @@ function pushBackendPatch() {
 function toggleBackend(id: string, on: boolean) {
   const seq = [...(backendSeq.value ?? [])];
   const i = seq.indexOf(id);
-  if (on && i < 0) seq.push(id);
+  // 新启用的源排到链头（刚开启 = 想让它优先试）；禁用再启用同语义
+  if (on && i < 0) seq.unshift(id);
   if (!on && i >= 0) seq.splice(i, 1);
   backendSeq.value = seq;
   pushBackendPatch();
@@ -1023,6 +1071,60 @@ function goDownload() {
                     </label>
                   </div>
                 </div>
+                <div class="svc-fields">
+                  <div class="quality-foot-row">
+                    <div class="label">
+                      <div>自建网易云 API（api-enhanced）</div>
+                      <div class="desc">
+                        {{ ncmConfigured
+                          ? "已配置：作为链头第一跳，取官方直链（试听片段自动跳过）"
+                          : "VutronMusic 同款架构；填地址后自动作为链头第一跳，未登录网易也能用服务端 cookie 取全曲" }}
+                      </div>
+                    </div>
+                    <input
+                      class="quality-input"
+                      type="text"
+                      :value="String(configDraft(neteasePlugin!).ncmBase ?? '')"
+                      placeholder="http://127.0.0.1:3010"
+                      spellcheck="false"
+                      @change="saveSvcField('ncmBase', $event)"
+                    />
+                  </div>
+                  <div class="quality-foot-row">
+                    <div class="label">
+                      <div>自建酷狗 API（KuGouMusicApi）</div>
+                      <div class="desc">
+                        {{ kgapiConfigured
+                          ? "已配置：链头第二跳；设备注册自动完成，免费曲免登录"
+                          : "填地址后自动作为链头第二跳；免费曲免登录可取，配酷狗 Cookie 可取账号权益内 VIP 曲" }}
+                      </div>
+                    </div>
+                    <input
+                      class="quality-input"
+                      type="text"
+                      :value="String(configDraft(neteasePlugin!).kgapiBase ?? '')"
+                      placeholder="http://127.0.0.1:3020"
+                      spellcheck="false"
+                      @change="saveSvcField('kgapiBase', $event)"
+                    />
+                  </div>
+                  <div class="quality-foot-row">
+                    <div class="label">
+                      <div>酷狗 Cookie（可选）</div>
+                      <div class="desc">
+                        在自建服务里登录酷狗（验证码 / 扫码接口都有），把返回的
+                        cookie 粘到这里；留空 = 只取免费曲
+                      </div>
+                    </div>
+                    <input
+                      class="quality-input"
+                      type="password"
+                      :value="String(configDraft(neteasePlugin!).kgapiCookie ?? '')"
+                      placeholder="token=...; userid=..."
+                      @change="saveSvcField('kgapiCookie', $event)"
+                    />
+                  </div>
+                </div>
                 <p class="quality-note backend-note">
                   {{
                     metingConfigured
@@ -1416,6 +1518,38 @@ function goDownload() {
   font-size: 12.5px;
   outline: none;
   flex: none;
+}
+.quality-input {
+  height: 34px;
+  width: 230px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+  flex: none;
+}
+.quality-input:focus {
+  border-color: var(--accent);
+}
+.svc-fields {
+  margin-top: 10px;
+}
+.svc-fields .quality-foot-row + .quality-foot-row {
+  margin-top: 8px;
+}
+@media (max-width: 860px) {
+  .quality-input {
+    width: 100%;
+    max-width: 300px;
+  }
+  .svc-fields .quality-foot-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
 }
 .quality-note {
   margin: 10px 0 0;

@@ -312,6 +312,15 @@ function unblockOn() {
  * 解析后端链：解析按后端列表**逐个尝试**，拿到可用直链立即返回，
  * 全部失败才回落官方试听：
  *
+ *   ncm:<地址>        —— 自建网易云 API 服务（api-enhanced，VutronMusic 同款
+ *                       架构）：/song/url 与官方 eapi 同源，插件登录 cookie
+ *                       随请求带上；服务端亦可自带 cookie，适合「应用未登录
+ *                       网易」场景。试听片段不算数，继续降级
+ *   kgapi:<地址>      —— 自建 KuGouMusicApi 服务：搜索 + /song/url（v5 签名
+ *                       协议，自动完成 /register/dev 两段设备注册拿 dfid）。
+ *                       免登录可取免费曲（与内置 kg 同权益）；配置酷狗登录
+ *                       cookie 后，账号权益内的 VIP / 独家曲也能取——这是
+ *                       内置 kg 匿名协议拿不到的部分
  *   gd               —— GD 音乐台（无损优先，但会限流 / 间歇 503）
  *   migu             —— 咪咕直链（内置实现，免登录完整曲，可升无损；自家 CDN 最稳）
  *   kw               —— 酷我直链（内置实现，128k 全曲，GD 挂了它兜底）
@@ -321,7 +330,8 @@ function unblockOn() {
  *                       翻唱过滤 + 标题歌手严格匹配，末位兜底）
  *   meting:<地址>     —— 任意 Meting 兼容后端（自建 Meting-API 等）
  *
- * 默认链 = gd → migu → kw → kg → bili + 「Meting 地址」配置（若已填）。unblockBackends
+ * 默认链 = 自建服务（ncm → kgapi，填了地址才进链）→ gd → migu → kw → kg → bili
+ * + 「Meting 地址」配置（若已填）。unblockBackends
  * 写了逗号序列时按用户给的顺序整链重置（设置 → 播放 → 解析播放源 生成）；
  * 写 off/none 表示全部关闭，直接跳过解析（受限歌曲只播官方试听）。
  */
@@ -334,6 +344,8 @@ function resolveBackends() {
     seen[key] = 1;
     list.push({ kind: kind, base: base || '' });
   }
+  if (ncmBase()) push('ncm', ncmBase());
+  if (kgapiBase()) push('kgapi', kgapiBase());
   push('gd', '');
   push('migu', '');
   push('kw', '');
@@ -368,6 +380,24 @@ function resolveBackends() {
       }
       if (seg === 'bili' || seg === 'bilibili') {
         push('bili', '');
+        continue;
+      }
+      if (seg === 'ncm' || seg === 'ncmapi') {
+        push('ncm', ncmBase());
+        continue;
+      }
+      if (seg === 'kgapi' || seg === 'kugouapi') {
+        push('kgapi', kgapiBase());
+        continue;
+      }
+      var mNcm = /^ncm:(.+)$/.exec(seg);
+      if (mNcm && mNcm[1].trim()) {
+        push('ncm', mNcm[1].trim().replace(/\/+$/, ''));
+        continue;
+      }
+      var mKgapi = /^kgapi:(.+)$/.exec(seg);
+      if (mKgapi && mKgapi[1].trim()) {
+        push('kgapi', mKgapi[1].trim().replace(/\/+$/, ''));
         continue;
       }
       var m = /^meting:(.+)$/.exec(seg);
@@ -418,6 +448,208 @@ function metingResolve(base, track, br) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 自建 API 服务（可选，链头两跳，VutronMusic 同款架构）
+// ---------------------------------------------------------------------------
+//
+//   网易云 api-enhanced（ncmBase）：Node 服务跑 @neteasecloudmusicapienhanced/api，
+//     /song/url 与插件直连的是同一个网易接口。增益在两处：①服务端可自带
+//     cookie（NCMA_COOKIE 等），应用未登录网易时也能拿到官方完整直链；
+//     ②已登录时插件 cookie 随请求带上，双保险。试听片段照旧不算数。
+//   酷狗 KuGouMusicApi（kgapiBase）：/search 免登录；/song/url 走 v5 签名
+//     协议，需要已注册设备的 dfid —— /register/dev 要调两次：第一段拿
+//     KUGOU_API_* 会话指纹，带上指纹再注册一次才下发真 dfid（实测匿名
+//     两段都 200）。dfid 进程内缓存；配了酷狗登录 cookie（kgapiCookie）
+//     则账号权益内的 VIP / 独家曲也能取。
+//
+// 两个地址留空 = 完全跳过，链行为与之前版本一致。
+
+function ncmBase() {
+  var s = String(leon.config.get('ncmBase') || '').trim();
+  return s.replace(/\/+$/, '');
+}
+
+function kgapiBase() {
+  var s = String(leon.config.get('kgapiBase') || '').trim();
+  return s.replace(/\/+$/, '');
+}
+
+function kgapiCookieCfg() {
+  return String(leon.config.get('kgapiCookie') || '').trim();
+}
+
+/** api-enhanced 取官方直链。br 档位换算成 eapi 的 bps 值；试听片段
+ *  （freeTrialInfo）与空 url 都视为「拿不到」，交给下一个后端。 */
+function ncmResolve(track, br, base) {
+  var b = (base || '').replace(/\/+$/, '') || ncmBase();
+  if (!b) return null;
+  var brMap = { 128: 128000, 192: 192000, 320: 320000, 999: 999000 };
+  var real = brMap[Number(br) || 320] || 320000;
+  var qs = 'id=' + encodeURIComponent(track.id) + '&br=' + real;
+  var cookie = String(leon.config.get('cookie') || '').trim();
+  if (cookie) qs += '&cookie=' + encodeURIComponent(cookie);
+  try {
+    var d = JSON.parse(leon.http.get(b + '/song/url?' + qs, { timeoutMs: 5000 }));
+    var item = d && d.data && d.data[0];
+    if (!item || !item.url || typeof item.url !== 'string') return null;
+    if (item.freeTrialInfo) return null;
+    if (item.url.indexOf('http') !== 0) return null;
+    var rate = Number(item.br) || 0;
+    if (rate > 9999) rate = Math.round(rate / 1000); // 网易回传 bps → 展示用 kbps
+    return { url: item.url, br: rate };
+  } catch (e) {
+    return null; // 服务挂/超时不能影响主链路
+  }
+}
+
+var kgapiDfid = '';
+var kgapiFailIds = {};
+
+/** KuGouMusicApi 设备注册拿 dfid。酷狗侧会记住 GUID→dfid 映射，所以两种
+ *  形态都要兜住：全新会话第一段返回 dfid=undefined，必须带指纹调第二段
+ *  才下发真 dfid；已有历史的会话第一段就直接在 Set-Cookie 里给真 dfid
+ *  （此时第二段反而返回空 data）。dfid 进程内缓存，之后每首歌零注册成本。 */
+function kgapiEnsureDfid(base) {
+  if (kgapiDfid) return kgapiDfid;
+  function pickDfid(res) {
+    var dfid = '';
+    try {
+      var body = JSON.parse(res && res.body);
+      var d = body && body.data;
+      if (d && typeof d.dfid === 'string') dfid = d.dfid;
+    } catch (e1) { /* body 非 JSON 忽略 */ }
+    if ((!dfid || dfid === 'undefined') && res && res.cookies && res.cookies.dfid) {
+      dfid = String(res.cookies.dfid);
+    }
+    return dfid && dfid !== 'undefined' ? dfid : '';
+  }
+  try {
+    var first = leon.http.getEx(base + '/register/dev');
+    var dfid = pickDfid(first);
+    if (!dfid) {
+      var session = cookieStringFrom(first && first.cookies, false);
+      if (session) {
+        var second = leon.http.getEx(
+          base + '/register/dev?cookie=' + encodeURIComponent(session)
+        );
+        dfid = pickDfid(second);
+      }
+    }
+    if (dfid) {
+      kgapiDfid = dfid;
+      return dfid;
+    }
+  } catch (e) { /* 服务挂/超时安静降级 */ }
+  return '';
+}
+
+function kgapiGet(base, path, params) {
+  var qs = [];
+  for (var k in params) {
+    if (!Object.prototype.hasOwnProperty.call(params, k)) continue;
+    var v = params[k];
+    if (v === undefined || v === null || v === '') continue;
+    qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+  }
+  try {
+    return JSON.parse(leon.http.get(base + path + '?' + qs.join('&'), { timeoutMs: 3500 }));
+  } catch (e) {
+    return null;
+  }
+}
+
+/** KuGouMusicApi 搜索 → 统一成 gdCandidateMatches 候选形状（与 kgSearch 同构）。
+ *  v2 复杂搜索的字段是帕斯卡命名（SongName/SingerName/AlbumID/HQFileHash...），
+ *  部分实例是 v3 小驼峰，两种拼写都兜住；em 高亮标签剥掉。 */
+function kgapiSearch(base, query) {
+  function stripEm(s) {
+    return String(s || '').replace(/<[^>]*>/g, '');
+  }
+  var d = kgapiGet(base, '/search', { keywords: query, pagesize: 10, page: 1 });
+  var info = d && d.data && (d.data.lists || d.data.info);
+  if (!Array.isArray(info)) return [];
+  var out = [];
+  for (var i = 0; i < info.length; i++) {
+    var it = info[i];
+    if (!it) continue;
+    out.push({
+      name: stripEm(it.SongName || it.songname),
+      artist: stripEm(it.SingerName || it.singername),
+      durationMs: (Number(it.HQDuration || it.Duration || it.duration) || 0) * 1000,
+      hashes: {
+        sq: it.SQFileHash || it.sqhash || '',
+        hq: it.HQFileHash || it['320hash'] || '',
+        std: it.FileHash || it.hash || ''
+      },
+      albumId: String(it.AlbumID || it.album_id || '')
+    });
+  }
+  return out;
+}
+
+/** 单档取链：status:1 + url 数组才算成功（v5 协议的扁平响应，与 /search
+ *  的 data 包裹不同层）。酷狗登录 cookie（若有）优先，dfid 只补缺。 */
+function kgapiTrackFor(base, dfid, hash, albumId, quality) {
+  if (!hash) return null;
+  var d = kgapiGet(base, '/song/url', {
+    hash: hash,
+    album_id: albumId,
+    quality: quality,
+    cookie: mergeCookies(kgapiCookieCfg(), 'dfid=' + dfid)
+  });
+  var url = d && d.status === 1 && Array.isArray(d.url) && d.url[0];
+  if (!url || typeof url !== 'string') return null;
+  return url.indexOf('http') === 0 ? url : null;
+}
+
+/** KuGouMusicApi 解析：搜索严格匹配 → 按 unblockBr 档位 hash/quality
+ *  逐级取链（sq+flac → hq+320 → std+128）。失败 id 缓存 30 分钟，
+ *  配合预解析让切歌等待趋近于零。 */
+function kgapiResolve(track, br, base) {
+  var b = (base || '').replace(/\/+$/, '') || kgapiBase();
+  if (!b) return null;
+  var blocked = kgapiFailIds[track.id];
+  if (blocked && Date.now() < blocked) return null;
+
+  var dfid = kgapiEnsureDfid(b);
+  if (!dfid) return '';
+
+  br = Number(br) || 0;
+  var query = (track.title + ' ' + (track.artist || '')).trim();
+  if (query.length < 2) return null;
+  var hit = null;
+  var list = kgapiSearch(b, query);
+  for (var i = 0; i < list.length; i++) {
+    if (gdCandidateMatches(track, list[i])) { hit = list[i]; break; }
+  }
+  if (!hit && track.title && track.title !== query) {
+    list = kgapiSearch(b, track.title);
+    for (var j = 0; j < list.length; j++) {
+      if (gdCandidateMatches(track, list[j])) { hit = list[j]; break; }
+    }
+  }
+  if (!hit) {
+    kgapiFailIds[track.id] = Date.now() + KG_FAIL_MS;
+    return null;
+  }
+
+  var wants = br >= 999
+    ? [['sq', 'flac', 900], ['hq', '320', 320], ['std', '128', 128]]
+    : br >= 192
+      ? [['hq', '320', 320], ['std', '128', 128]]
+      : [['std', '128', 128]];
+  for (var w = 0; w < wants.length; w++) {
+    var tier = wants[w][0];
+    var url = kgapiTrackFor(b, dfid, hit.hashes[tier], hit.albumId, wants[w][1]);
+    if (url) {
+      delete kgapiFailIds[track.id];
+      return { url: url, br: wants[w][2] };
+    }
+  }
+  kgapiFailIds[track.id] = Date.now() + KG_FAIL_MS;
+  return null;
+}
+
 /** 统一解析入口：按后端链逐个尝试。 */
 function resolveTrack(track) {
   var br = unblockBr();
@@ -425,17 +657,21 @@ function resolveTrack(track) {
   for (var i = 0; i < backends.length; i++) {
     var r = null;
     try {
-      r = backends[i].kind === 'gd'
-        ? gdResolve(track, br)
-        : backends[i].kind === 'migu'
-          ? miguResolve(track, br)
-          : backends[i].kind === 'kw'
-            ? kwResolve(track)
-            : backends[i].kind === 'kg'
-              ? kgResolve(track, br)
-              : backends[i].kind === 'bili'
-                ? biliResolve(track)
-                : metingResolve(backends[i].base, track, br);
+      r = backends[i].kind === 'ncm'
+        ? ncmResolve(track, br, backends[i].base)
+        : backends[i].kind === 'kgapi'
+          ? kgapiResolve(track, br, backends[i].base)
+          : backends[i].kind === 'gd'
+            ? gdResolve(track, br)
+            : backends[i].kind === 'migu'
+              ? miguResolve(track, br)
+              : backends[i].kind === 'kw'
+                ? kwResolve(track)
+                : backends[i].kind === 'kg'
+                  ? kgResolve(track, br)
+                  : backends[i].kind === 'bili'
+                    ? biliResolve(track)
+                    : metingResolve(backends[i].base, track, br);
     } catch (e) {
       r = null; // 单个后端的任何异常都不能影响其它后端
     }

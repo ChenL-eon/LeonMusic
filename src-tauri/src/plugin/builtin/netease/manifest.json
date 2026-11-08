@@ -1,9 +1,9 @@
 {
   "id": "netease",
   "name": "网易云音乐",
-  "version": "2.15.0",
+  "version": "2.16.0",
   "api": 1,
-  "description": "内置网易云 web 端接口（weapi/eapi），开箱即用，无需自建服务。匿名可搜索、取歌词、看个性推荐歌单；登录支持扫码、短信验证码（手机号与验证码只发往网易官方服务器）与 Cookie 三种方式，登录后可用账号权限内的完整曲目与音质，首页有每日推荐，账号页可一键导入云端歌单与「我喜欢的音乐」。登录后播放会自动打卡同步：满 30 秒的真实播放上报网易云（计入最近播放 / 听歌排行 / 听歌时长，10–30 分钟后可见），可在下方关闭。扫码登录可能被网易云账号级风控拦截（手机提示「设备环境异常」），此时可用验证码或 Cookie 登录。官方只给 30 秒试听时，默认尝试第三方解析取完整直链（解析音质跟随所选档位，无损档可拿到 FLAC），解析按后端链自动轮换（GD 音乐台 → 咪咕直链 → 酷我直链 → 酷狗直链 → bilibili DASH → 自建 Meting，前一个限流或宕机自动换下一个；咪咕链免登录、国内直连最稳，无损档可升 FLAC），可在下方关闭。音质档位在「设置 → 播放 → 在线音质」选择，实际规格以播放条显示为准（官方可能静默降级，不确保有效）。仅供个人学习与技术研究，请遵守当地版权法规。",
+  "description": "内置网易云 web 端接口（weapi/eapi），开箱即用，无需自建服务。匿名可搜索、取歌词、看个性推荐歌单；登录支持扫码、短信验证码（手机号与验证码只发往网易官方服务器）与 Cookie 三种方式，登录后可用账号权限内的完整曲目与音质，首页有每日推荐，账号页可一键导入云端歌单与「我喜欢的音乐」。登录后播放会自动打卡同步：满 30 秒的真实播放上报网易云（计入最近播放 / 听歌排行 / 听歌时长，10–30 分钟后可见），可在下方关闭。扫码登录可能被网易云账号级风控拦截（手机提示「设备环境异常」），此时可用验证码或 Cookie 登录。官方只给 30 秒试听时，默认尝试第三方解析取完整直链（解析音质跟随所选档位，无损档可拿到 FLAC），解析按后端链自动轮换（自建网易云 API（api-enhanced）→ 自建 KuGouMusicApi（配酷狗 Cookie 可取账号权益内 VIP 曲）→ GD 音乐台 → 咪咕直链 → 酷我直链 → 酷狗直链 → bilibili DASH → 自建 Meting，前一个限流或宕机自动换下一个；自建服务填了地址才进链，咪咕链免登录、国内直连最稳，无损档可升 FLAC），可在下方关闭。音质档位在「设置 → 播放 → 在线音质」选择，实际规格以播放条显示为准（官方可能静默降级，不确保有效）。仅供个人学习与技术研究，请遵守当地版权法规。",
   "author": "LeonMusic",
   "main": "index.js",
   "capabilities": [
@@ -44,7 +44,31 @@
       "fieldType": "string",
       "default": "",
       "required": false,
-      "placeholder": "留空 = GD 音乐台 → 咪咕直链 → 酷我直链 → 酷狗直链 → bilibili DASH + 下方 Meting 地址（若已填）自动轮换；由「设置 → 播放 → 解析播放源」开关与排序生成，填 off 关闭全部解析。也可手写逗号序列：gd / migu / kw / kg / bili 与 meting:地址，如 gd,migu,kw,kg,bili,meting:https://my.server/meting；前一个失败自动换下一个，全部失败回落官方试听"
+      "placeholder": "留空 = 自建服务（填了地址才进链）→ GD 音乐台 → 咪咕直链 → 酷我直链 → 酷狗直链 → bilibili DASH + 下方 Meting 地址（若已填）自动轮换；由「设置 → 播放 → 解析播放源」开关与排序生成，填 off 关闭全部解析。也可手写逗号序列：ncm:地址 / kgapi:地址 / gd / migu / kw / kg / bili 与 meting:地址，如 kgapi:http://127.0.0.1:3020,gd,migu；前一个失败自动换下一个，全部失败回落官方试听"
+    },
+    {
+      "key": "ncmBase",
+      "label": "自建网易云 API 地址（设置 → 播放 里填写）",
+      "fieldType": "string",
+      "default": "",
+      "required": false,
+      "placeholder": "api-enhanced 服务（VutronMusic 同款），如 http://127.0.0.1:3010；留空跳过"
+    },
+    {
+      "key": "kgapiBase",
+      "label": "自建酷狗 API 地址（设置 → 播放 里填写）",
+      "fieldType": "string",
+      "default": "",
+      "required": false,
+      "placeholder": "KuGouMusicApi 服务，如 http://127.0.0.1:3020；留空跳过"
+    },
+    {
+      "key": "kgapiCookie",
+      "label": "酷狗 Cookie（可选，设置 → 播放 里填写）",
+      "fieldType": "password",
+      "default": "",
+      "required": false,
+      "placeholder": "在自建服务登录酷狗后把 cookie 粘到这里（token=...; userid=...）；配了可取账号权益内 VIP 曲，留空只取免费曲"
     },
     {
       "key": "scrobble",
