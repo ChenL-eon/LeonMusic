@@ -225,8 +225,10 @@ export const usePlayerStore = defineStore("player", () => {
 
         // 官方 eapi 常「code 200 但静默忽略 level」：选了无损却只给 320k MP3。
         // 播放条常驻显示真实规格，这里只在该曲首次播放时提示一次。
+        // 试听片段不走这条——它下面还有一条「只有 N 秒试听」，同时弹两条
+        // 只会让用户以为「既降质又没版权」，信息重复。
         const q = payload.quality;
-        if (q?.downgraded && payload.status === "playing" && payload.track?.id) {
+        if (q?.downgraded && !q.trial && payload.status === "playing" && payload.track?.id) {
           const id = payload.track.id;
           if (!qualityWarned.has(id)) {
             qualityWarned.add(id);

@@ -325,12 +325,12 @@ fn host_http_post_form(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
         let Some(state) = guard.as_ref() else {
             return Err("host not ready".to_string());
         };
-        let mut req = state
-            .http
-            .client_for(&url)
-            .post(&url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body);
+        let has_ct = has_content_type(&headers);
+        let mut req = state.http.client_for(&url).post(&url);
+        if !has_ct {
+            req = req.header("Content-Type", "application/x-www-form-urlencoded");
+        }
+        req = req.body(body);
         if let Some(map) = headers.as_object() {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
@@ -411,6 +411,19 @@ fn split_response_headers(
     (out, cookies)
 }
 
+/// 调用方是否自己指定了 `Content-Type`（大小写不敏感）。
+///
+/// `postForm` / `postFormEx` 默认补 `application/x-www-form-urlencoded`，
+/// 但 reqwest 的 `RequestBuilder::header` 是**追加**语义：再补一次就变成
+/// 两个 Content-Type，服务端按第一个（form）解析 JSON body，酷我解锁
+/// 接口因此回 439 sign invalid。所以有自定义头时必须让位。
+fn has_content_type(headers: &serde_json::Value) -> bool {
+    headers
+        .as_object()
+        .map(|m| m.keys().any(|k| k.eq_ignore_ascii_case("content-type")))
+        .unwrap_or(false)
+}
+
 /// 与 [`host_http_post_form`] 发同样的请求，但把**响应头和 Set-Cookie 交回脚本**。
 ///
 /// 扫码登录能成立全靠这个：网易云在 `code=803` 时 body 里只有一句
@@ -438,12 +451,15 @@ fn host_http_post_form_ex(_this: &JsValue, args: &[JsValue], ctx: &mut Context) 
         let Some(state) = guard.as_ref() else {
             return Err("host not ready".to_string());
         };
-        let mut req = state
-            .http
-            .client_for(&url)
-            .post(&url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(body);
+        // 只有调用方没自己指定 Content-Type 时才补默认的 form 编码。
+        // 追加语义下（reqwest `header()` 是 append）会同时发出两个
+        // Content-Type，酷我 BD 的解锁接口会直接判 439 sign invalid——
+        // 2026-11-08《恋人》只出 41 秒试听就是这个原因。
+        let mut req = state.http.client_for(&url).post(&url);
+        if !has_content_type(&req_headers) {
+            req = req.header("Content-Type", "application/x-www-form-urlencoded");
+        }
+        req = req.body(body);
         if let Some(map) = req_headers.as_object() {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
@@ -900,6 +916,32 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
         assert_eq!(headers["content-type"], "application/json;charset=UTF-8");
     }
 
+    /// 插件传了自己的 Content-Type 时，宿主不能再补 form 编码。
+    /// 回归：2026-11-08 酷我解锁接口收到两个 Content-Type → 439，
+    /// 导致《恋人》等 VIP 曲一律回落到 41 秒试听。
+    #[test]
+    fn caller_content_type_is_not_duplicated() {
+        // has_content_type = 「调用方自带」，为 false 时才由宿主补 form 编码
+        assert!(!has_content_type(&serde_json::Value::Null), "无头对象应补默认");
+        assert!(!has_content_type(&serde_json::json!({})), "空对象应补默认");
+        assert!(
+            !has_content_type(&serde_json::json!({ "plat": "ar", "devid": "1" })),
+            "只有业务头时应补默认"
+        );
+        assert!(
+            has_content_type(&serde_json::json!({ "content-type": "application/json" })),
+            "小写 content-type"
+        );
+        assert!(
+            has_content_type(&serde_json::json!({ "Content-Type": "application/json" })),
+            "常见大小写混写"
+        );
+        assert!(
+            has_content_type(&serde_json::json!({ "CONTENT-TYPE": "text/plain" })),
+            "全大写"
+        );
+    }
+
     /// 插件脚本本身要能被 boa 解析，且暴露出约定的入口。
     /// 这条能挡住「改 JS 时漏了逗号但打包时才发现」。
     #[test]
@@ -955,6 +997,54 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
         let sign = signed.rsplit("&sign=").next().unwrap_or_default();
         assert_eq!(sign.len(), 32, "md5 应是 32 位 hex: {sign}");
         assert!(sign.chars().all(|c| c.is_ascii_hexdigit()), "md5 非 hex: {sign}");
+    }
+
+    /// 真联网：在 boa 里跑完整补位链，验证「宿主实现差异」不会被引擎吞掉。
+    ///
+    /// 2026-11-08 用户实测《恋人》（网易 2600493765，VIP 版权曲）只出 41 秒
+    /// 试听，而 Node 侧同一份 JS 能拿到 53MB FLAC——差异只能出在宿主
+    /// （`leon.http.*` / `leon.md5` / `Date.now`）这一层。这条测试把链路
+    /// 搬回真实宿主执行，默认 ignore，手动跑：
+    /// `cargo test --lib -- --ignored netease_resolve_live`
+    #[test]
+    #[ignore]
+    fn netease_resolve_live_in_boa() {
+        let script = include_str!("builtin/netease/index.js");
+        let mut cfg = HashMap::new();
+        cfg.insert("unblock".to_string(), "on".to_string());
+        cfg.insert("unblockQuality".to_string(), "999".to_string());
+        let track = serde_json::json!({
+            "id": "2600493765",
+            "title": "恋人",
+            "artist": "李荣浩",
+            "durationMs": 276000
+        });
+        for name in ["kuwoSearch", "bodianResolve", "resolveTrack"] {
+            let t0 = std::time::Instant::now();
+            // kuwoSearch 吃查询字符串，另两个吃 track 对象
+            let arg = if name == "kuwoSearch" {
+                serde_json::json!("恋人 李荣浩")
+            } else {
+                track.clone()
+            };
+            let r = call_function(script, name, &[arg], cfg.clone());
+            match r {
+                Ok(v) => {
+                    let s = v.to_string();
+                    println!(
+                        "{name} ({}ms) => {}",
+                        t0.elapsed().as_millis(),
+                        s.chars().take(300).collect::<String>()
+                    );
+                }
+                Err(e) => println!("{name} ({}ms) ERR {e}", t0.elapsed().as_millis()),
+            }
+        }
+        let v = call_function(script, "resolveTrack", &[track], cfg).expect("resolveTrack 执行失败");
+        assert!(
+            v.get("url").and_then(|u| u.as_str()).is_some(),
+            "补位链没拿到直链: {v}"
+        );
     }
 
     /// kuwoSearch 空查询不走网络，直接返回空数组（引擎里跑通参数校验分支）。
