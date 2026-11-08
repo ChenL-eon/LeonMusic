@@ -961,6 +961,8 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | 起播耗时归因（本次） | 真实联网基准（Boa 宿主 + 真实 CDN，同一首连测） | ✅ 解析链是 4 个串行请求：酷我搜索 199–217ms / 广告解锁 87–143ms / 取链 84–91ms / Range 长度探测 23–24ms，`resolveTrack` 内部 494–523ms，另加每次新建 Context 的 eval 85–96ms。起播段（开流 + probe + 首个解码块）原本要再冷握一次 CDN 证书 ~200ms，共享连接池 + 探测预热后降到 17–34ms；冷连接首请求 208ms vs 复用 25ms |
 | 坏缓存防护（本次） | `cargo test --lib` + 桌面缓存实扫 | ✅ 落盘前按魔数校验（ID3 / fLaC / OggS / RIFF / ftyp / MP3 帧同步 / ASF）：`.part` 大小等于 Content-Length 但内容不是音频时**只跳过缓存**，播放不受影响；打开缓存失败时只删除 media 缓存目录内的文件并清库记录，用户本地音乐不碰。测试：HTML 正文（长度精确匹配）不落盘且 `.part` 被清理、魔数表 flac/id3/帧同步/m4a/wav/html/json/空。桌面缓存目录现存 4 文件 154.9 MB 全为音频，无历史坏文件。51 passed / 0 failed |
 | 启动不再等曲库（本次） | `npm run build` + `build/mock_tauri.js`（可延迟指定 IPC）+ 无头 Edge 390×844 / 1280×800 | ✅ 曲库 IPC 延迟 2000ms：300ms 时首页已渲染、6 行骨架（52px 封面与真实行同尺寸，填充不跳动）、全程无启动遮罩；2s 后骨架消失、8 行真实曲目。延迟 0：`bootSpinner` 从未出现。播放器快照延迟 600ms：320ms 时显示 spinner「正在启动…」，1300ms 后首页就绪。桌面 1280 宽：侧栏/播放条正常，仅主区居中 spinner。首屏只等 `settings`+`player`（4 个 IPC），曲库与播放器并行且不阻塞渲染 |
+| 播放按钮图标居中（本次） | `npm run build` + 无头 Edge 390×844 dpr3（把 path 换成 pause-f 后量几何） | ✅ 根因是 `class="ctrl main"` 撞上全局 `.main { padding: 16px 14px 6px }`（<860px 生效），grid 内容区被压得下移 5px；改 `.primary` + `.ctrl{padding:0}` 后 svg 中心 = 按钮中心、双条 bbox 中心 = 按钮中心（delta 0,0）；`pause-f` 同时右移 0.5 单位，几何中心落回 viewBox 的 12 |
+| 官方 320k 时仍取 FLAC（本次） | 真实联网 `getStreamUrl` + `node build/test_resolve_chain.cjs` | ✅ 根因：官方 eapi 给「非试听 320k」时旧逻辑直接 return，第三方链从未被问；《水之湄》实测酷我 BD 稳定给 2000k FLAC（连测 6 次 900）。改后 `getStreamUrl` 返回 `source=resolved / format=flac / bitrate=900000 / downgraded=false`；解析只到 320/128 时保留官方链接；官方给 FLAC 时零解析请求。插件 2.20.0，单测 37 passed / 0 failed，Rust 51 passed |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
 （普通 / 多时间标签 / 逐字 / 偏移 / 同时间戳译文合并）、文件名解析、
