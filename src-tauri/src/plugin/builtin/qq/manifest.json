@@ -1,0 +1,40 @@
+{
+  "id": "qq",
+  "name": "QQ 音乐",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "内置 QQ 音乐曲库搜索，用来补网易云没有版权的曲目（周杰伦、部分日韩与欧美专辑等），匿名可用、无需登录、不写任何账号数据。搜索走 QQ 官方 musicu.fcg 接口，返回歌名、歌手、专辑、时长与封面；歌词由 PlayLyricInfo 下发（base64 的 LRC）。QQ 侧匿名播放直链已关闭（vkey 接口返回 500003，旧 C400 链接 403），所以开播时按「歌名 + 歌手」走与网易云受限曲目相同的第三方解析链：酷我 BD 优先（命中率最高、可出 FLAC），咪咕补它无版权的歌；两源都找不到才明确报错，不会放 30 秒试听糊弄。解析可在下方关闭，但关掉后本音源将无法播放。音质档位跟随「设置 → 播放 → 在线音质」，实际规格以播放条显示为准。仅供个人学习与技术研究，请遵守当地版权法规。",
+  "author": "LeonMusic",
+  "main": "index.js",
+  "capabilities": [
+    "search",
+    "stream",
+    "lyric"
+  ],
+  "config": [
+    {
+      "key": "level",
+      "label": "在线音质（设置 → 播放 里选择）",
+      "fieldType": "string",
+      "default": "exhigh",
+      "required": false,
+      "placeholder": "standard / higher / exhigh / lossless 由「设置 → 播放 → 在线音质」写入；QQ 曲目没有官方直链，实际规格取决于第三方解析"
+    },
+    {
+      "key": "unblock",
+      "label": "受限歌曲解析（第三方服务）",
+      "fieldType": "boolean",
+      "default": "on",
+      "required": false,
+      "placeholder": "QQ 曲目的唯一播放途径：按「酷我 BD → 咪咕」顺序取完整直链。关闭后本音源将无法播放"
+    },
+    {
+      "key": "unblockQuality",
+      "label": "解析音质",
+      "fieldType": "string",
+      "default": "320",
+      "required": false,
+      "placeholder": "留空或 128 / 192 / 320 / 999；选音质档位时自动同步，999 对部分曲目可拿到 FLAC"
+    }
+  ]
+}

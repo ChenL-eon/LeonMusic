@@ -79,7 +79,7 @@ function configFields(p: PluginInfo) {
 }
 
 // ---------------------------------------------------------------------------
-// 在线音质：写进 netease 插件配置，与插件 `leon.config.get()` 读的是同一份数据
+// 在线音质：写进各公共音源插件的配置，与插件 `leon.config.get()` 读的是同一份数据
 // ---------------------------------------------------------------------------
 
 /** 对标网易云 App「音质选择」的常见档位，下拉里从低到高排列。
@@ -149,16 +149,28 @@ const currentUnblockBr = computed(() => {
   return UNBLOCK_BR.some((b) => b.value === saved) ? saved : "320";
 });
 
-/** 只改一个键，其余插件参数与已保存的 Cookie 原样保留。
- *  改完同步 pluginDraft：插件页保存别的参数时不会把旧音质写回来。 */
-async function patchNeteaseConfig(patch: Record<string, string>, okText: string) {
-  const p = neteasePlugin.value;
-  if (!p || qualityBusy.value) return;
+/** 在线音质是公共音源共用的：网易云决定官方请求的 level，QQ 音乐决定
+ *  第三方解析要的码率。只写 netease 会让后来加的音源一直停在 manifest
+ *  默认值 320 —— 用户选了无损却拿不到 FLAC。按「manifest 声明了 level」
+ *  来认，不写死插件 id。
+ *  只改一个键，其余插件参数与已保存的 Cookie 原样保留；改完同步
+ *  pluginDraft，插件页保存别的参数时不会把旧音质写回来。 */
+async function patchQualityConfig(patch: Record<string, string>, okText: string) {
+  if (qualityBusy.value) return;
+  const ids = store.pluginList
+    .filter((p) => p.manifest.config.some((f) => f.key === "level"))
+    .map((p) => p.manifest.id);
+  if (!ids.length) return;
   qualityBusy.value = true;
   try {
-    await store.setPluginConfig(p.manifest.id, { ...p.config, ...patch });
-    const draft = pluginDraft[p.manifest.id];
-    if (draft) Object.assign(draft, patch);
+    for (const id of ids) {
+      // setPluginConfig 内部会 reloadPlugins，重新取最新 config 再写入
+      const p = store.pluginList.find((x) => x.manifest.id === id);
+      if (!p) continue;
+      await store.setPluginConfig(id, { ...p.config, ...patch });
+      const draft = pluginDraft[id];
+      if (draft) Object.assign(draft, patch);
+    }
     ui.toast(okText, "success");
   } catch (e) {
     ui.toast(errorText(e), "error");
@@ -171,7 +183,7 @@ async function patchNeteaseConfig(patch: Record<string, string>, okText: string)
  *  以前两个设置各管各的：选「无损」但解析仍是 320，实际播的是 MP3。 */
 function setQuality(q: (typeof QUALITY_LEVELS)[number]) {
   if (!q.available || q.level === currentLevel.value) return Promise.resolve();
-  return patchNeteaseConfig(
+  return patchQualityConfig(
     { level: q.level, unblockQuality: q.br },
     `已设为「${q.name}」${q.br === "999" ? "（解析请求无损）" : `（解析 ${q.br} kbps）`}，下一首开始生效`,
   );
@@ -197,7 +209,7 @@ function setQualityByLevel(e: Event) {
 function setUnblockBr(e: Event) {
   const value = (e.target as HTMLSelectElement).value;
   if (value === currentUnblockBr.value) return;
-  void patchNeteaseConfig({ unblockQuality: value }, "解析音质已更新，下一首开始生效");
+  void patchQualityConfig({ unblockQuality: value }, "解析音质已更新，下一首开始生效");
 }
 
 // 装了新插件 / 重新扫描后，draft 要跟上，否则输入框绑 undefined

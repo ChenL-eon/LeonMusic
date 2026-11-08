@@ -34,3 +34,4 @@ Thumbs.db
 # 下面那条例外就失效了。解析链单测是唯一需要长期保留的资产。
 build/**
 !build/test_resolve_chain.cjs
+!build/test_qq_plugin.cjs

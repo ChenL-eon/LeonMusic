@@ -90,7 +90,7 @@ LeonMusic/
 │       │   └── engine.rs       # 引擎线程 + 共享原子状态 + 状态推送
 │       ├── library/            # 扫描 / 元数据 / 封面 / LRC（逐字）解析
 │       ├── net/                # reqwest 客户端 + 整曲缓存 + LRU 淘汰
-│       ├── plugin/             # 音源插件协议 + boa JS 沙箱 + 4 个内置插件
+│       ├── plugin/             # 音源插件协议 + boa JS 沙箱 + 5 个内置插件
 │       ├── platform/
 │       │   ├── mod.rs          # PlatformHost trait（唯一的平台分叉点）
 │       │   ├── windows/        # 托盘 / 全局快捷键 / SMTC / 悬浮歌词窗
@@ -412,8 +412,25 @@ settings.applyTheme() → app_set_dark_appearance(dark)
 
 ### 5.1 协议（API v1）
 
-内置四个：`netease`（网易云，开箱即用、支持扫码/验证码/Cookie 登录与受限歌曲解析）、`navidrome`、`jellyfin`、`emby`。
+内置五个：`netease`（网易云，开箱即用、支持扫码/验证码/Cookie 登录与受限歌曲解析）、`qq`（QQ 音乐曲库搜索，补网易云没版权的歌）、`navidrome`、`jellyfin`、`emby`。
 插件目录：`<appData>/plugins/<id>/{manifest.json, index.js}`。
+
+**`qq` 插件（1.0.0）**：独立插件，只声明 `search` / `stream` / `lyric`，
+不登录、不写账号。搜索走 `musicu.fcg` 的 `DoSearchForQQMusicDesktop`
+（匿名、支持分页），主接口频控时退到 `client_search_cp` GET 端点；
+两端都失败才抛「可能触发了频控」的可操作错误，明确返回空结果则不报错。
+歌词走 `GetPlayLyricInfo`，只用 `songMID` 即可取，返回的 `lyric` 是
+base64 LRC，插件内纯 JS 解码。QQ 的匿名播放直链已关（`vkey` 500003、
+旧 `C400` 403），所以 `getStreamUrl` 按「歌名 + 歌手」走酷我 BD → 咪咕，
+与 netease 插件里 `qq:` 导入曲目是同一套逻辑——插件沙箱没有 `require`，
+两份副本要同步维护。宿主把搜索结果的 id 包成 `qq:<mid>`，但通过
+`pluginTrackId`（原始 mid）传回插件。`unblock` 关掉时明确报错，不放试听。
+桌面首页内联搜索、独立搜索页、移动端搜索都按
+`capabilities.includes("search")` 动态列源，新增音源插件无需再改 UI；
+首页的选择存在 `localStorage` 的 `leonmusic.home.searchSource`，插件被停用
+后回落到第一个可用源，切换时若已有关键词会立刻按新音源重搜。
+「设置 → 播放 → 在线音质」会写进所有声明了 `level` 配置项的插件
+（按 manifest 判定，不写死 id）。
 
 `manifest.json`：
 

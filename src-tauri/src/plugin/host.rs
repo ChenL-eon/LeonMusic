@@ -33,6 +33,11 @@ const BUILTINS: &[Builtin] = &[
         script: include_str!("builtin/netease/index.js"),
     },
     Builtin {
+        id: "qq",
+        manifest: include_str!("builtin/qq/manifest.json"),
+        script: include_str!("builtin/qq/index.js"),
+    },
+    Builtin {
         id: "navidrome",
         manifest: include_str!("builtin/navidrome/manifest.json"),
         script: include_str!("builtin/navidrome/index.js"),

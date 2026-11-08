@@ -12,14 +12,43 @@ import TrackList from "@/components/TrackList.vue";
 import { errorText, plugins as pluginApi } from "@/api/ipc";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
+import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 import type { RecommendFeed, RemotePlaylistMeta, Track } from "@/types";
 
 const NETEASE = "netease";
+const SEARCH_SOURCE_KEY = "leonmusic.home.searchSource";
 
 const ui = useUiStore();
 const library = useLibraryStore();
 const player = usePlayerStore();
+const settingsStore = useSettingsStore();
+
+/** 首页内联搜索的音源可切换。推荐流 / 排行榜仍固定走网易云（那是账号相关
+ *  能力），只有搜索这条路径支持 QQ 音乐。按 capabilities 动态列源，
+ *  以后再加音源插件不用改这里；选择记在 localStorage，重启不丢。 */
+const searchSources = computed(() =>
+  settingsStore.pluginList
+    .filter((p) => p.enabled && p.manifest.capabilities.includes("search"))
+    .sort(
+      (a, b) =>
+        Number(b.manifest.id === "netease") - Number(a.manifest.id === "netease") ||
+        a.manifest.name.localeCompare(b.manifest.name),
+    ),
+);
+const searchSource = ref(NETEASE);
+
+function onSearchSourceChange(e: Event) {
+  const id = (e.target as HTMLSelectElement).value;
+  searchSource.value = id;
+  try {
+    localStorage.setItem(SEARCH_SOURCE_KEY, id);
+  } catch {
+    // 隐私模式 / 禁用存储时忽略，本次会话内仍生效
+  }
+  // 已经敲了关键词就按新音源立刻重搜，别让用户再敲一次
+  if (q.value.trim()) void runSearch();
+}
 
 const feed = ref<RecommendFeed | null>(null);
 const toplists = ref<RemotePlaylistMeta[]>([]);
@@ -57,7 +86,20 @@ async function load(silent = false) {
   }
 }
 
-onMounted(() => void load());
+onMounted(async () => {
+  await settingsStore.init();
+  let saved = NETEASE;
+  try {
+    saved = localStorage.getItem(SEARCH_SOURCE_KEY) || NETEASE;
+  } catch {
+    // 忽略存储不可用的情况
+  }
+  // 插件被停用 / 卸载后，记住的音源可能已不存在，回落到第一个可用源
+  searchSource.value = searchSources.value.some((p) => p.manifest.id === saved)
+    ? saved
+    : (searchSources.value[0]?.manifest.id ?? NETEASE);
+  void load();
+});
 /* 页面被 KeepAlive 缓存后切回首页不再重挂载：内容秒出，
    超过 10 分钟才静默补一次推荐，不闪加载态。 */
 onActivated(() => {
@@ -98,7 +140,7 @@ async function runSearch() {
   const seq = ++searchSeq;
   searching.value = true;
   try {
-    const items = await pluginApi.search(NETEASE, kw, 1, 30);
+    const items = await pluginApi.search(searchSource.value || NETEASE, kw, 1, 30);
     if (seq !== searchSeq) return; // 已有更新的请求，丢弃过期结果
     results.value = items;
   } catch (e) {
@@ -219,7 +261,16 @@ function playCount(n: number): string {
         <button v-if="q" class="clear" aria-label="清空搜索" @click="clearSearch">
           <Icon name="close" :size="13" />
         </button>
-        <kbd>网易云</kbd>
+        <select
+          class="source-pick"
+          :value="searchSource"
+          aria-label="搜索音源"
+          @change="onSearchSourceChange"
+        >
+          <option v-for="s in searchSources" :key="s.manifest.id" :value="s.manifest.id">
+            {{ s.manifest.name }}
+          </option>
+        </select>
       </div>
     </header>
 
@@ -433,14 +484,23 @@ function playCount(n: number): string {
 .clear:hover {
   color: var(--text);
 }
-.search-box kbd {
+.source-pick {
   flex: none;
-  font-size: 10px;
-  padding: 2px 8px;
+  max-width: 116px;
+  font-size: 10.5px;
+  padding: 2px 6px;
   border-radius: 999px;
   color: var(--text-3);
   background: var(--hover);
   border: 1px solid var(--border);
+  outline: none;
+  cursor: pointer;
+}
+.source-pick:hover {
+  color: var(--text);
+}
+.source-pick:focus-visible {
+  border-color: var(--accent);
 }
 .kw {
   font-size: 13px;
