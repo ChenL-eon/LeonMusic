@@ -937,6 +937,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 
 | 检查项 | 命令 | 结果 |
 |---|---|---|
+| Windows 便携版 1.0.9（本轮修复后重编） | `cargo build --release --features custom-protocol` → `Compress-Archive` 打单文件 zip | ✅ `E://Test//LeonMusic-1.0.9-windows-x64-portable.zip`，8,724,311 B，sha256 `d4406bab1b05091cb000934db6a5bdeafee5d0d40fdc9b566229209f718445e5`；包内仅 `LeonMusic.exe`（23,612,928 B，sha256 `2d87cc747fa7755fc0d2eab71f6d3abb1607055a9b3dedc6d5ab2e239654cbf2`），`testzip()` 通过；`FileVersion/ProductVersion=1.0.9`；CDP 实测主窗口 `https://tauri.localhost/`、歌词窗 `/lyric.html`，1420 端口关闭仍正常渲染（侧栏 + 每日推荐），确认是生产构建；`dist` 六个资源名全部命中 exe |
 | Android 1.0.8 APK（智能音质 + 移动端设置） | 移走旧 APK 后 `npx tauri android build --apk --target aarch64` | ✅ `E://Test//LeonMusic-1.0.8-android-arm64.apk`，22,665,919 B，sha256 `2e43a62caccc21c61d4f774b44562ee3b6bc5be51a03bbdb26e770ca23ef5658`；`versionName=1.0.8` / `native-code='arm64-v8a'`；720 条目、`testzip()` 通过、EOCD 落在文件末尾（尾部 22 B）、APK v2 签名块存在，证书 `ebb3bdb8…a3c133` 与 1.0.7 一致可覆盖安装；`dist/index.html` 引用的 4 个资源名（`main--zpnJAbT.js` / `main-Dw6mAz88.js` / `main-DlRkE16r.css` / `main-BiUk6kif.css`）全部命中 `.so` 内嵌字符串；步进框在竖屏保持紧凑、横屏 `align-self: center` 回正 |
 | Rust 编译（Windows） | `cargo check --lib` | ✅ 0 warning |
 | Rust 编译（Android arm64） | `cargo check --lib --target aarch64-linux-android` | ✅ 0 warning |
@@ -944,7 +945,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | Rust 联网回归 | `cargo test --lib -- --ignored --nocapture` | ✅ 3 passed：搜索/直链/歌词、扫码建码/轮询/匿名账号、VIP 曲解析到完整直链（`Content-Range` 9,584,893 字节） |
 | 前端类型 | `npx vue-tsc --noEmit` | ✅ |
 | 前端构建 | `npx vite build` | ✅ 双入口 |
-| Windows 便携版（单文件 exe） | `npx tauri build --no-bundle` | ✅ 加载 `http://tauri.localhost/`，CDP 验证登录弹层 |
+| Windows 便携版（单文件 exe） | `npx tauri build --no-bundle` | ✅ 加载 `http://tauri.localhost/`，CDP 验证登录弹层。**注意**：本次 1.0.9 用同一命令构建出的指纹是 `features: []`（未带 `custom-protocol`），显式 `cargo build --release --features custom-protocol` 后才是 `["custom-protocol"]` —— 出包一律用后者，别只看「编译成功」 |
 | Windows 便携版 VIP 全曲 | CDP 驱动 `plugin_search` → `player_play_tracks` → `player_snapshot` | ✅ 2.2.0 开关默认开启；`fee=1` 海阔天空 `durationMs=239560`、`playing`、`error=null`、无试听提示 |
 | VIP 曲真实音频输出 | `pycaw` 读 Windows 音频会话 `IAudioMeterInformation` | ✅ 本地 WAV 峰值 0.38；在线 VIP 0.19；连播 6 首周杰伦 VIP 曲峰值 0.19–0.61，全部非静音 |
 | 音频自检 / 重连 | 设置 → 播放 → 音频输出自检 | ✅ `player_audio_diag` 返回设备名、音量、已输出帧、欠载、设备错误与判读提示；`player_audio_reset` 重绑系统默认设备并保持播放位置 |
