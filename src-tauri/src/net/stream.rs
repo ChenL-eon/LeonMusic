@@ -26,7 +26,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use symphonia::core::io::MediaSource;
 
@@ -57,6 +57,9 @@ struct StreamState {
     pos: u64,
     /// 文件全长（Content-Length / Content-Range total）。
     len: Option<u64>,
+    /// 首次连接的响应 Content-Type。音源失效时服务端常回 200 + HTML/JSON，
+    /// 探测器只会说「不认识这个格式」，带上它才能一眼看出是「回了个网页」。
+    content_type: Option<String>,
     /// 请求下载线程从该偏移重开 Range 连接；None = 继续当前连接。
     restart: Option<u64>,
     eof: bool,
@@ -82,6 +85,40 @@ impl Clone for HttpStream {
 impl HttpStream {
     fn lock(&self) -> std::sync::MutexGuard<'_, StreamState> {
         self.0.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 首次连接的 Content-Type（尚未建连时为 None）。
+    pub fn content_type(&self) -> Option<String> {
+        self.lock().content_type.clone()
+    }
+
+    /// 探测用：等首块数据到齐，复制开头 `max` 字节，**不移动读游标**。
+    ///
+    /// 只对「从 0 开始、尚未淘汰头部」的会话有效；已重连到中间位置时返回空。
+    /// 目的是让调用方在交给 symphonia 之前就能识别「服务器回的是网页/JSON」，
+    /// 否则只会得到一句 `no suitable format reader found`。
+    pub fn sniff(&self, max: usize, wait: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + wait;
+        let mut st = self.lock();
+        loop {
+            if st.base == 0 && !st.buf.is_empty() {
+                let n = max.min(st.buf.len());
+                return st.buf[..n].to_vec();
+            }
+            if st.base > 0 || st.eof || st.err.is_some() {
+                return Vec::new();
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Vec::new();
+            }
+            let (next, _) = self
+                .0
+                .cv
+                .wait_timeout(st, left)
+                .unwrap_or_else(|p| p.into_inner());
+            st = next;
+        }
     }
 }
 
@@ -205,6 +242,7 @@ pub fn spawn_download(
             buf: Vec::new(),
             pos: 0,
             len: None,
+            content_type: None,
             restart: None,
             eof: false,
             err: None,
@@ -386,8 +424,14 @@ fn run_download(
         if !connected {
             match open_range(&client, &url, referer, None) {
                 Ok((r, _base, total)) => {
+                    let ct = r
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
                     let mut st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
                     st.len = total;
+                    st.content_type = ct;
                     resp = Some(r);
                     connected = true;
                 }
@@ -615,10 +659,18 @@ mod tests {
     /// 外网测试文件（SoundHelix 等）经系统代理时通时断（seek_forward 曾挂满
     /// 120s 超时），流式链路测试一律本地化，字节内容调用方自定义。
     fn spawn_mock(data: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        spawn_mock_with_type(data, None)
+    }
+
+    /// 同 `spawn_mock`，但指定响应 Content-Type（验证「回的是网页」诊断）。
+    fn spawn_mock_with_type(
+        data: Vec<u8>,
+        ct: Option<&'static str>,
+    ) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read as _, Write as _};
         use std::net::{TcpListener, TcpStream};
 
-        fn serve_range(conn: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
+        fn serve_range(conn: &mut TcpStream, data: &[u8], ct: Option<&str>) -> std::io::Result<()> {
             let mut buf = Vec::new();
             let mut byte = [0u8; 1];
             loop {
@@ -642,16 +694,17 @@ mod tests {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0);
             let body = &data[start..];
+            let ct_line = ct.map(|c| format!("Content-Type: {c}\r\n")).unwrap_or_default();
             let resp = if head.contains("Range:") {
                 format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\n{ct_line}Connection: close\r\n\r\n",
                     body.len(),
                     start,
                     data.len() - 1,
                     data.len()
                 )
             } else {
-                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{ct_line}Connection: close\r\n\r\n", body.len())
             };
             conn.write_all(resp.as_bytes())?;
             conn.write_all(body)?;
@@ -668,7 +721,7 @@ mod tests {
                 };
                 let data = data.clone();
                 std::thread::spawn(move || {
-                    let _ = serve_range(&mut conn, &data);
+                    let _ = serve_range(&mut conn, &data, ct);
                 });
             }
         });
@@ -1047,5 +1100,60 @@ mod tests {
         drop(pending2.done);
         let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(&fin);
+    }
+
+    /// ⑥ 音源失效时服务端常回 200 + 登录页 / JSON / 空体。旧版只看得到
+    ///    symphonia 的 `no suitable format reader found`（2026-11-08 安卓端
+    ///    用户截图），分不清是「链接失效」还是「格式不支持」。现在按开头
+    ///    字节判定，直接给出中文结论 + Content-Type。
+    #[test]
+    fn non_audio_response_is_explained() {
+        let cases: [(&str, Vec<u8>); 3] = [
+            (
+                "html",
+                b"<!DOCTYPE html><html><body>Please sign in</body></html>".to_vec(),
+            ),
+            ("json", br#"{"error":"token expired"}"#.to_vec()),
+            ("empty", Vec::new()),
+        ];
+        for (name, body) in cases {
+            let (url, server) = match name {
+                "html" => spawn_mock_with_type(body, Some("text/html; charset=utf-8")),
+                "json" => spawn_mock_with_type(body, Some("application/json")),
+                _ => spawn_mock(body),
+            };
+            let (tmp, fin) = scratch(name);
+            let client = crate::net::client::BlockingHttp::new();
+            let pending = spawn_download(
+                url.clone(),
+                client.stream_client_for(&url).clone(),
+                None,
+                tmp.clone(),
+                fin.clone(),
+                Box::new(|_| {}),
+            )
+            .unwrap();
+            let err = match DecodeSource::open_stream(pending.stream, &url) {
+                Ok(_) => panic!("{name}: non-audio body must not probe successfully"),
+                Err(e) => e.detail().to_string(),
+            };
+            println!("[{name}] {err}");
+            if name == "empty" {
+                assert!(err.contains("没有返回任何数据"), "{name}: {err}");
+            } else {
+                assert!(err.contains("不是音频"), "{name}: {err}");
+            }
+            if name == "html" {
+                assert!(err.contains("网页/XML"), "{name}: {err}");
+                assert!(err.contains("text/html"), "{name}: {err}");
+            }
+            if name == "json" {
+                assert!(err.contains("JSON"), "{name}: {err}");
+            }
+            drop(pending.done);
+            drop(server);
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&fin);
+        }
     }
 }

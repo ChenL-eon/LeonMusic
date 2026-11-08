@@ -135,20 +135,109 @@ pub struct SymphoniaSource {
     pending: Vec<f32>,
 }
 
+/// probe 失败时的取证信息：流式音源的开头字节与响应 Content-Type。
+/// 本地文件走 `Default`（两个字段都空），note() 返回空串不污染错误。
+#[derive(Default)]
+struct SourceDiag {
+    /// 是否来自 HTTP 流（本地文件为 false，错误消息不带来源说明）
+    remote: bool,
+    head: Vec<u8>,
+    content_type: Option<String>,
+}
+
+impl SourceDiag {
+    /// 开头像网页 / XML / JSON：这类响应绝不是音频，直接给结论，
+    /// 不再让 symphonia 报「no suitable format reader found」。
+    fn non_audio_kind(&self) -> Option<&'static str> {
+        let text = String::from_utf8_lossy(&self.head);
+        let trimmed = text.trim_start_matches('\u{feff}').trim_start();
+        let head = trimmed.get(..16).unwrap_or(trimmed).to_ascii_lowercase();
+        if head.starts_with("<!doctype")
+            || head.starts_with("<html")
+            || head.starts_with("<head")
+            || head.starts_with("<?xml")
+        {
+            Some("网页/XML")
+        } else if head.starts_with('{') || head.starts_with('[') {
+            Some("JSON")
+        } else {
+            None
+        }
+    }
+
+    /// 响应正文开头的可读片段（换行压成空格）。
+    fn snippet(&self) -> String {
+        let text = String::from_utf8_lossy(&self.head);
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        flat.chars().take(56).collect()
+    }
+
+    /// 附在 probe 错误后面的技术细节。
+    fn note(&self) -> String {
+        let ct = self.content_type.as_deref();
+        if self.remote {
+            if self.head.is_empty() {
+                return format!(
+                    "（来源没有返回任何数据，Content-Type: {}）",
+                    ct.unwrap_or("无")
+                );
+            }
+            return format!(
+                "（Content-Type: {}，开头字节 {}）",
+                ct.unwrap_or("无"),
+                hex_head(&self.head)
+            );
+        }
+        // 本地文件：加密格式（ncm / mflac）、改过后缀、空文件都落在这里
+        if self.head.is_empty() {
+            return "（文件是空的：0 字节）".to_string();
+        }
+        format!("（文件开头字节 {}）", hex_head(&self.head))
+    }
+}
+
+fn hex_head(head: &[u8]) -> String {
+    head.iter()
+        .take(10)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SymphoniaSource {
     pub fn open(path: &Path) -> AppResult<Self> {
-        let file = File::open(path)?;
+        let mut file = File::open(path)?;
+        // 留一份开头字节：probe 失败时（加密格式 / 改过后缀 / 空文件）能直接
+        // 看出文件真实长相，不用再让用户把文件发过来
+        let mut head = vec![0u8; 96];
+        let n = file.read(&mut head)?;
+        head.truncate(n);
+        let _ = file.seek(SeekFrom::Start(0));
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        Self::open_mss(mss, &ext)
+        Self::open_mss(mss, &ext, &SourceDiag { head, ..Default::default() })
     }
 
     /// 流式打开：HTTP 流（边下边播）+ URL 后缀作容器 Hint。
     pub fn open_stream(stream: crate::net::stream::HttpStream, url: &str) -> AppResult<Self> {
+        // 先取开头字节与 Content-Type：链接失效时服务端常回 200 + 登录页/JSON，
+        // symphonia 只会给一句「找不到格式」，看不出到底谁的问题。
+        let diag = SourceDiag {
+            remote: true,
+            head: stream.sniff(96, std::time::Duration::from_millis(1200)),
+            content_type: stream.content_type(),
+        };
+        if let Some(kind) = diag.non_audio_kind() {
+            return Err(AppError::decode(format!(
+                "音源返回的不是音频（{kind}，Content-Type: {}）：「{}」——链接可能已失效或需要登录",
+                diag.content_type.as_deref().unwrap_or("无"),
+                diag.snippet()
+            )));
+        }
         let mss = MediaSourceStream::new(Box::new(stream), Default::default());
         let lower = url.to_ascii_lowercase();
         let path = lower.split('?').next().unwrap_or("");
@@ -159,10 +248,10 @@ impl SymphoniaSource {
         } else {
             ""
         };
-        Self::open_mss(mss, ext)
+        Self::open_mss(mss, ext, &diag)
     }
 
-    fn open_mss(mss: MediaSourceStream, ext: &str) -> AppResult<Self> {
+    fn open_mss(mss: MediaSourceStream, ext: &str, diag: &SourceDiag) -> AppResult<Self> {
         let mut hint = Hint::new();
         if !ext.is_empty() {
             hint.with_extension(ext);
@@ -178,7 +267,7 @@ impl SymphoniaSource {
                 },
                 &MetadataOptions::default(),
             )
-            .map_err(|e| AppError::decode(format!("probe failed: {e}")))?;
+            .map_err(|e| AppError::decode(format!("probe failed: {e}{}", diag.note())))?;
 
         let format = probed.format;
         let track = format
@@ -543,4 +632,42 @@ pub fn sniff_container(path: &Path) -> AppResult<String> {
         return Ok("m4a".into());
     }
     Ok("unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 本地加密缓存（网易云 ncm 开头是 `CTENFDAM`）或改过后缀的文件：
+    /// 错误里必须带文件真实开头，否则只有一句 `no suitable format reader found`。
+    #[test]
+    fn local_non_audio_file_reports_head_bytes() {
+        let p = std::env::temp_dir().join(format!("lm-bad-{}.mp3", std::process::id()));
+        std::fs::write(&p, b"CTENFDAM\x00\x01\x02not a real mp3").unwrap();
+        let err = match DecodeSource::open(&p) {
+            Ok(_) => panic!("encrypted header must not probe successfully"),
+            Err(e) => e.detail().to_string(),
+        };
+        let _ = std::fs::remove_file(&p);
+        println!("[local-bad] {err}");
+        assert!(err.contains("probe failed"), "{err}");
+        assert!(
+            err.contains("文件开头字节 43 54 45 4e 46 44 41 4d"),
+            "{err}"
+        );
+    }
+
+    /// 0 字节文件要明确说「空」，别让用户以为是格式问题
+    #[test]
+    fn local_empty_file_is_reported_as_empty() {
+        let p = std::env::temp_dir().join(format!("lm-empty-{}.flac", std::process::id()));
+        std::fs::write(&p, b"").unwrap();
+        let err = match DecodeSource::open(&p) {
+            Ok(_) => panic!("empty file must not probe successfully"),
+            Err(e) => e.detail().to_string(),
+        };
+        let _ = std::fs::remove_file(&p);
+        println!("[local-empty] {err}");
+        assert!(err.contains("0 字节"), "{err}");
+    }
 }
