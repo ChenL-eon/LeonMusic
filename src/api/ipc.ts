@@ -14,6 +14,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AudioDiag,
   CloudPlaylist,
+  LikeCheck,
+  LikeResult,
   Lyrics,
   PlatformInfo,
   PlayerSnapshot,
@@ -25,6 +27,7 @@ import type {
   PluginLoginState,
   QueueSnapshot,
   RecommendFeed,
+  RemotePlaylistMeta,
   RepeatMode,
   ScanSummary,
   Settings,
@@ -183,6 +186,21 @@ export const plugins = {
       "plugin_scrobble",
       { pluginId, trackId, listenedMs },
     ),
+  /** 红心 / 取消红心（进「我喜欢的音乐」）。未登录返回 ok:false + code:301 */
+  likeTrack: (pluginId: string, trackId: string, like: boolean) =>
+    invoke<LikeResult>("plugin_like_track", { pluginId, trackId, like }),
+  /** 查一首歌是否已被红心（红心按钮初始状态） */
+  isLiked: (pluginId: string, trackId: string) =>
+    invoke<LikeCheck>("plugin_is_liked", { pluginId, trackId }),
+  /** 官方排行榜列表（免登录可用）；曲目复用 cloudPlaylist 拉取 */
+  toplists: (pluginId: string) =>
+    invoke<RemotePlaylistMeta[]>("plugin_toplists", { pluginId }),
+  /** 私人FM：按账号口味推歌，登录态一次 3 首 */
+  personalFm: (pluginId: string) =>
+    invoke<Track[]>("plugin_personal_fm", { pluginId }),
+  /** 相似歌曲：播放页「听相似」用 */
+  similarSongs: (pluginId: string, trackId: string, limit = 30) =>
+    invoke<Track[]>("plugin_similar_songs", { pluginId, trackId, limit }),
 };
 
 export const settings = {

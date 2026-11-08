@@ -108,8 +108,29 @@ function playRow(t: Track) {
 }
 
 async function fav(t: Track) {
-  const on = await library.toggleFavorite(t.id);
+  // 云端红心联动（网易云插件 2.14.0）：插件曲目直接同步网易云
+  const on = await library.toggleFavoriteTrack(t);
   ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+}
+
+/** 私人FM：按账号口味推一批歌直接开播（未登录服务端只给试听）。 */
+const fmLoading = ref(false);
+async function playFm() {
+  if (fmLoading.value) return;
+  fmLoading.value = true;
+  try {
+    const tracks = await pluginApi.personalFm(NETEASE);
+    if (!tracks.length) {
+      ui.toast("私人FM没有返回歌曲，稍后再试", "info");
+      return;
+    }
+    await player.playTracks(tracks, 0);
+    ui.toast(`私人FM · ${tracks.length} 首`);
+  } catch (e) {
+    ui.toast(String(e), "error");
+  } finally {
+    fmLoading.value = false;
+  }
 }
 
 function more(t: Track) {
@@ -173,6 +194,15 @@ function more(t: Track) {
       </button>
     </div>
 
+    <button class="fm-card" :disabled="fmLoading" @click="playFm">
+      <span class="fm-icon"><Icon name="radio" :size="20" /></span>
+      <span class="fm-txt">
+        <b>私人FM</b>
+        <small>{{ fmLoading ? "正在挑歌…" : "按你的口味随机推歌" }}</small>
+      </span>
+      <Icon name="play" :size="16" filled class="fm-play" />
+    </button>
+
     <div class="m-section">
       <h2>{{ sectionTitle }}</h2>
       <button class="m-round primary" aria-label="播放全部" @click="playAll(feed)">
@@ -185,7 +215,7 @@ function more(t: Track) {
         v-for="t in feed"
         :key="t.id"
         :track="t"
-        :fav="library.favoriteIds.has(t.id)"
+        :fav="library.isFav(t)"
         :current="player.snap.track?.id === t.id"
         @play="playRow"
         @favorite="fav"
@@ -279,6 +309,49 @@ function more(t: Track) {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.9);
   color: #222;
+}
+.fm-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  margin: 12px 0 4px;
+  border-radius: var(--m-r-lg);
+  background: var(--surface, rgba(128, 128, 128, 0.08));
+  text-align: left;
+}
+.fm-card:active {
+  transform: scale(0.985);
+}
+.fm-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--accent, #d64141);
+  color: #fff;
+  flex-shrink: 0;
+}
+.fm-txt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.fm-txt b {
+  font-size: 14px;
+  font-weight: 700;
+}
+.fm-txt small {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.fm-play {
+  color: var(--text-3);
+  flex-shrink: 0;
 }
 .rows {
   display: flex;

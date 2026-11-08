@@ -120,6 +120,35 @@ pub struct RemotePlaylistMeta {
     pub play_count: i64,
     #[serde(default)]
     pub copywriter: String,
+    /// 排行榜的更新频率（如「每天更新」）；推荐流 / 账号歌单里为空。
+    #[serde(default)]
+    pub update_frequency: String,
+}
+
+/// `likeTrack(id, like)` 的返回：红心操作结果（网易云插件 2.14.0）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LikeResult {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub code: i64,
+    #[serde(default)]
+    pub liked: bool,
+    #[serde(default)]
+    pub playlist_id: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// `isLikedTrack(id)` 的返回：红心按钮的初始状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LikeCheck {
+    #[serde(default)]
+    pub logged_in: bool,
+    #[serde(default)]
+    pub liked: bool,
 }
 
 /// `getPlaylist(id)` 的返回：歌单元数据 + 曲目列表。

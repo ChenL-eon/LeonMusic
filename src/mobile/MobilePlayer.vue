@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 沉浸式播放页（全屏覆盖层）：封面模糊背景 + 封面/歌词分页 + 5 键控制栏。
  *  参考 KA Music 的 PlayerPage：从右侧滑入、下拉或点箭头关闭。 */
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 
 import CoverArt from "@/components/CoverArt.vue";
@@ -19,7 +19,9 @@ const ui = useUiStore();
 const { snap, track, isPlaying, lyrics, currentLineIndex, displayPosition } = storeToRefs(player);
 
 const pane = ref<0 | 1>(0);
-const fav = computed(() => (track.value ? library.favoriteIds.has(track.value.id) : false));
+const fav = computed(() => library.isFav(track.value));
+/** 切歌时刷新云端红心状态（网易云插件曲目；失败静默） */
+watch(track, (t) => void library.refreshCloudLiked(t), { immediate: true });
 /** 随机是独立开关：开时显示 shuffle 图标，其余按 repeat 显示 */
 const repeatIcon = computed(() =>
   snap.value.shuffle ? "shuffle" : snap.value.repeat === "one" ? "repeat-one" : "repeat",
@@ -48,7 +50,7 @@ function cycleMode() {
 
 async function toggleFav() {
   if (!track.value) return;
-  const on = await library.toggleFavorite(track.value.id);
+  const on = await library.toggleFavoriteTrack(track.value);
   ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
 }
 

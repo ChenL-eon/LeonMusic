@@ -925,6 +925,12 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             "unblockOn",
             "isTrialUrlItem",
             "gdResolve",
+            // 2.14.0：红心 / 排行榜 / 私人FM / 相似歌曲
+            "likeTrack",
+            "isLikedTrack",
+            "getToplists",
+            "getPersonalFm",
+            "getSimilarSongs",
         ] {
             let v = global.get(js_string!(name), &mut ctx).expect("lookup");
             assert!(v.is_callable(), "缺少入口函数 {name}");
@@ -1409,6 +1415,50 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
         let info = call_function(script, "loginInfo", &[], HashMap::new()).expect("账号信息失败");
         println!("account -> {info}");
         assert_eq!(info["loggedIn"].as_bool(), Some(false));
+    }
+
+    /// 真联网验证 2.14.0 四个新接口（匿名态）：排行榜 / 私人FM / 相似歌曲
+    /// 可直接用，红心匿名应返回 ok:false + code:301（不抛异常）。
+    /// `cargo test --lib netease_four_api_live -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要联网访问 music.163.com"]
+    fn netease_four_api_live() {
+        let script = include_str!("builtin/netease/index.js");
+
+        let tops = call_function(script, "getToplists", &[], HashMap::new()).expect("排行榜失败");
+        let tops = tops.as_array().expect("排行榜应是数组");
+        println!("toplists -> {} 项，第一项：{}", tops.len(), tops[0]);
+        assert!(!tops.is_empty(), "排行榜为空");
+        assert!(!tops[0]["id"].as_str().unwrap_or("").is_empty());
+        assert!(!tops[0]["name"].as_str().unwrap_or("").is_empty());
+
+        let fm = call_function(script, "getPersonalFm", &[], HashMap::new()).expect("私人FM失败");
+        let fm = fm.as_array().expect("私人FM应是数组");
+        println!("personalFm -> {} 首，第一首：{}", fm.len(), fm[0]);
+        assert!(!fm.is_empty(), "私人FM为空（匿名也应返回 1 首试听）");
+
+        let simi = call_function(
+            script,
+            "getSimilarSongs",
+            &[serde_json::json!("347230"), serde_json::json!(5)],
+            HashMap::new(),
+        )
+        .expect("相似歌曲失败");
+        let simi = simi.as_array().expect("相似歌曲应是数组");
+        println!("similarSongs -> {} 首", simi.len());
+        assert!(!simi.is_empty(), "相似歌曲为空");
+
+        // 匿名红心：必须返回结构化失败（ok:false + code:301），不能抛异常
+        let like = call_function(
+            script,
+            "likeTrack",
+            &[serde_json::json!("347230"), serde_json::json!(true)],
+            HashMap::new(),
+        )
+        .expect("红心调用失败（应返回结构化结果而不是异常）");
+        println!("likeTrack (anon) -> {like}");
+        assert_eq!(like["ok"].as_bool(), Some(false));
+        assert_eq!(like["code"].as_i64(), Some(301));
     }
 
     /// 真联网验证「VIP 曲 → 第三方解析 → 完整文件」这条新增链路。

@@ -271,6 +271,11 @@ pub fn run() {
             commands::plugin_user_playlists,
             commands::plugin_cloud_playlist,
             commands::plugin_scrobble,
+            commands::plugin_like_track,
+            commands::plugin_is_liked,
+            commands::plugin_toplists,
+            commands::plugin_personal_fm,
+            commands::plugin_similar_songs,
             // settings
             commands::settings_get,
             commands::settings_update,

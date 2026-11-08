@@ -206,6 +206,23 @@ export interface RemotePlaylistMeta {
   trackCount: number;
   playCount: number;
   copywriter: string;
+  /** 排行榜的更新频率（如「每天更新」）；推荐流 / 账号歌单里为空 */
+  updateFrequency?: string;
+}
+
+/** 红心操作结果（网易云插件 2.14.0） */
+export interface LikeResult {
+  ok: boolean;
+  code: number;
+  liked: boolean;
+  playlistId: string;
+  message?: string;
+}
+
+/** 红心按钮初始状态 */
+export interface LikeCheck {
+  loggedIn: boolean;
+  liked: boolean;
 }
 
 /** 插件推荐聚合：登录后含每日推荐歌单+歌曲，未登录只有个性推荐歌单 */

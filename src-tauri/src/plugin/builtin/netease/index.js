@@ -1251,9 +1251,9 @@ function getLyric(track) {
 // ---------------------------------------------------------------------------
 //
 //   personalized/playlist    个性推荐歌单，免登录可用
-//   personalized/newsong     推荐新歌（曲目来源），免登录可用
-//                            （原每日推荐 v1/recommend-resource /
-//                            v3/recommend-songs 已被网易下线，2026-11 实测 404）
+//   personalized/newsong     推荐新歌（未登录时的曲目来源），免登录可用
+//   v3/discovery/recommend/songs  真·每日推荐歌曲（登录可用，31 首；
+//                            此前 404 的 v3/recommend-songs 少了 discovery 段）
 //   user/playlist            账号歌单，第一项固定是「我喜欢的音乐」
 //   v6/playlist/detail       歌单详情，tracks 最多返回 n 首（trackIds 有全量 id）
 //
@@ -1337,21 +1337,45 @@ function getRecommendFeed(limit) {
     leon.log('recommendFeed personalized err: ' + e);
   }
 
-  // 推荐歌曲流：每日推荐接口（v1/recommend/resource、v3/recommend/songs）
-  // 网易已下线（2026-11 实测 weapi/eapi/明文全部 404「接口未找到」），
-  // 改用推荐新歌接口做曲目来源——免登录可用，字段 songToTrack 直接兼容。
-  try {
-    var songs = JSON.parse(
-      postWeb('/weapi/personalized/newsong', weapi({ type: 'recommend', limit: size, csrf_token: csrfToken() }))
-    );
-    if (songs.code !== 200) leon.log('recommendFeed newsong code=' + songs.code);
-    var list = (songs.code === 200 && songs.result) || [];
-    for (var k = 0; k < list.length && out.tracks.length < size; k++) {
-      var t = songToTrack(list[k] && list[k].song);
+  // 推荐歌曲流。登录态走真正的每日推荐 /v3/discovery/recommend/songs
+  // （VutronMusic 同款路径；2026-11 实测登录 cookie 返回 31 首，
+  // data.dailySongs 字段与 songToTrack 兼容——此前 404 的
+  // v1/recommend-resource / v3/recommend-songs 是少了 discovery 段）。
+  // 未登录该接口 code:301，回落推荐新歌（免登录可用）。
+  var dailySongs = null;
+  if (out.loggedIn) {
+    try {
+      var daily = JSON.parse(
+        postWeb('/weapi/v3/discovery/recommend/songs', weapi({ afresh: true, csrf_token: csrfToken() }))
+      );
+      if (daily.code === 200 && daily.data && daily.data.dailySongs) {
+        dailySongs = daily.data.dailySongs;
+      } else {
+        leon.log('recommendFeed discovery code=' + daily.code);
+      }
+    } catch (e) {
+      leon.log('recommendFeed discovery err: ' + e);
+    }
+  }
+  if (dailySongs && dailySongs.length) {
+    for (var k = 0; k < dailySongs.length && out.tracks.length < size; k++) {
+      var t = songToTrack(dailySongs[k]);
       if (t && t.id) out.tracks.push(t);
     }
-  } catch (e) {
-    leon.log('recommendFeed newsong err: ' + e);
+  } else {
+    try {
+      var songs = JSON.parse(
+        postWeb('/weapi/personalized/newsong', weapi({ type: 'recommend', limit: size, csrf_token: csrfToken() }))
+      );
+      if (songs.code !== 200) leon.log('recommendFeed newsong code=' + songs.code);
+      var list = (songs.code === 200 && songs.result) || [];
+      for (var k2 = 0; k2 < list.length && out.tracks.length < size; k2++) {
+        var t2 = songToTrack(list[k2] && list[k2].song);
+        if (t2 && t2.id) out.tracks.push(t2);
+      }
+    } catch (e2) {
+      leon.log('recommendFeed newsong err: ' + e2);
+    }
   }
 
   if (out.loggedIn) {
@@ -1417,6 +1441,139 @@ function getPlaylist(id) {
     trackCount: p.trackCount || (p.trackIds && p.trackIds.length) || tracks.length,
     tracks: tracks
   };
+}
+
+// ---------------------------------------------------------------------------
+// 红心收藏 / 官方排行榜 / 私人FM / 相似歌曲
+// ---------------------------------------------------------------------------
+//
+// 这四个接口的路径与参数按 api-enhanced（VutronMusic 背后的网易云 API
+// 库，stark81 fork 维护）逐字核对，并已用真实登录 Cookie 实测过返回形状：
+//   like   -> POST /weapi/radio/like  {code:200, playlistId}，未登录 301
+//   toplist -> GET  /api/toplist      {list:[65 项榜单元数据]}，免登录可用
+//   fm     -> POST /weapi/v1/radio/get {data:[旧式 song]}，匿名仅 1 首
+//   simiSong -> POST /weapi/v1/discovery/simiSong {songs:[旧式 song]}
+// FM / 相似歌曲返回的是旧式 song（artists/album/duration），songToTrack
+// 的 `s.al || s.album` 兼容写法正好覆盖，无需单独映射。
+
+/**
+ * 红心 / 取消红心。成功后这首歌进（或移出）「我喜欢的音乐」。
+ * 幂等：对已红心的歌再 like=true 服务端不报错（返回原 playlistId）。
+ * 返回 { ok, code, playlistId, message }；未登录 code 301。
+ */
+function likeTrack(id, like) {
+  var want = !(like === false || like === 'false' || like === 0 || like === '0');
+  var data = JSON.parse(
+    post(
+      '/weapi/radio/like',
+      weapi({
+        alg: 'itembased',
+        trackId: String(id || ''),
+        like: want,
+        time: '3',
+        csrf_token: csrfToken()
+      })
+    )
+  );
+  if (Number(data.code) !== 200) {
+    return { ok: false, code: Number(data.code) || -1, message: describe(data) };
+  }
+  return { ok: true, code: 200, liked: want, playlistId: String(data.playlistId || '') };
+}
+
+/** 检查一首歌是否已被当前账号红心。uid 可不传（自动从账号信息取）。 */
+function isLikedTrack(id, uid) {
+  var userId = String(uid || '');
+  if (!userId) {
+    var profile = null;
+    try {
+      profile = accountProfile();
+    } catch (e) {
+      profile = null;
+    }
+    if (!profile || !profile.userId) return { loggedIn: false, liked: false };
+    userId = String(profile.userId);
+  }
+  var data = JSON.parse(
+    post('/weapi/song/like/get', weapi({ uid: userId, csrf_token: csrfToken() }))
+  );
+  if (Number(data.code) !== 200) throw new Error('获取红心列表失败：' + describe(data));
+  var ids = data.ids || [];
+  var sid = String(id || '');
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i]) === sid) return { loggedIn: true, liked: true };
+  }
+  return { loggedIn: true, liked: false };
+}
+
+/**
+ * 官方排行榜列表（飙升榜 / 热歌榜 / 新歌榜 / 原创榜……共 65 项）。
+ * GET /api/toplist 无加密、免登录可用。榜单本身不含曲目——榜单 id
+ * 就是特殊歌单 id，宿主拿到后复用 getPlaylist(id) 拉曲目即可。
+ */
+function getToplists() {
+  var data = JSON.parse(leon.http.get(API + '/api/toplist'));
+  if (Number(data.code) !== 200) throw new Error('获取排行榜失败：' + describe(data));
+  var out = [];
+  var list = data.list || [];
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i];
+    if (!t || !t.id) continue;
+    out.push({
+      id: String(t.id),
+      name: t.name || '',
+      coverUrl: httpsUrl((t.coverImgUrl || '') + '?param=300y300'),
+      trackCount: t.trackCount || 0,
+      updateFrequency: t.updateFrequency || '',
+      copywriter: t.description || ''
+    });
+  }
+  return out;
+}
+
+/**
+ * 私人FM：按账号口味滚动推歌。登录态每次给 3 首，匿名只给 1 首
+ * 且播放受限（拿到的多是试听）。返回 tracks 数组，宿主转完整 Track。
+ */
+function getPersonalFm() {
+  var data = JSON.parse(
+    post('/weapi/v1/radio/get', weapi({ csrf_token: csrfToken() }))
+  );
+  if (Number(data.code) !== 200) throw new Error('获取私人FM失败：' + describe(data));
+  var tracks = [];
+  var songs = data.data || [];
+  for (var i = 0; i < songs.length; i++) {
+    var t = songToTrack(songs[i]);
+    if (t && t.id) tracks.push(t);
+  }
+  return tracks;
+}
+
+/**
+ * 相似歌曲：基于一首歌的推荐（播放页「听相似」用）。免登录可用。
+ * limit 服务端上限 50，默认取 30。
+ */
+function getSimilarSongs(id, limit) {
+  var size = Math.min(Math.max(Number(limit) || 30, 1), 50);
+  var data = JSON.parse(
+    post(
+      '/weapi/v1/discovery/simiSong',
+      weapi({
+        songid: String(id || ''),
+        limit: size,
+        offset: 0,
+        csrf_token: csrfToken()
+      })
+    )
+  );
+  if (Number(data.code) !== 200) throw new Error('获取相似歌曲失败：' + describe(data));
+  var tracks = [];
+  var songs = data.songs || [];
+  for (var i = 0; i < songs.length; i++) {
+    var t = songToTrack(songs[i]);
+    if (t && t.id) tracks.push(t);
+  }
+  return tracks;
 }
 
 // ---------------------------------------------------------------------------

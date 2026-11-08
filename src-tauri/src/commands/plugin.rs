@@ -344,6 +344,67 @@ pub async fn plugin_scrobble(
     plugins.scrobble(&plugin_id, &track_id, listened_ms).await
 }
 
+// ---------------------------------------------------------------------------
+// 红心收藏 / 排行榜 / 私人FM / 相似歌曲（网易云插件 2.14.0）
+// ---------------------------------------------------------------------------
+
+/// 红心 / 取消红心。未登录返回 `ok:false + code:301`（不算错误）。
+#[tauri::command]
+pub async fn plugin_like_track(
+    app: AppHandle,
+    plugin_id: String,
+    track_id: String,
+    like: bool,
+) -> AppResult<crate::plugin::protocol::LikeResult> {
+    let plugins = app.state::<AppState>().plugins.clone();
+    plugins.like_track(&plugin_id, track_id.trim(), like).await
+}
+
+/// 查询一首歌是否已被红心（红心按钮初始状态）。
+#[tauri::command]
+pub async fn plugin_is_liked(
+    app: AppHandle,
+    plugin_id: String,
+    track_id: String,
+) -> AppResult<crate::plugin::protocol::LikeCheck> {
+    let plugins = app.state::<AppState>().plugins.clone();
+    plugins.is_liked_track(&plugin_id, track_id.trim()).await
+}
+
+/// 官方排行榜列表（免登录可用）。曲目复用 plugin_cloud_playlist 拉取。
+#[tauri::command]
+pub async fn plugin_toplists(
+    app: AppHandle,
+    plugin_id: String,
+) -> AppResult<Vec<crate::plugin::protocol::RemotePlaylistMeta>> {
+    let plugins = app.state::<AppState>().plugins.clone();
+    plugins.toplists(&plugin_id).await
+}
+
+/// 私人FM：按账号口味推歌，登录态一次 3 首。
+#[tauri::command]
+pub async fn plugin_personal_fm(
+    app: AppHandle,
+    plugin_id: String,
+) -> AppResult<Vec<crate::models::Track>> {
+    let plugins = app.state::<AppState>().plugins.clone();
+    plugins.personal_fm(&plugin_id).await
+}
+
+/// 相似歌曲：播放页「听相似」用。
+#[tauri::command]
+pub async fn plugin_similar_songs(
+    app: AppHandle,
+    plugin_id: String,
+    track_id: String,
+    limit: Option<u32>,
+) -> AppResult<Vec<crate::models::Track>> {
+    let plugins = app.state::<AppState>().plugins.clone();
+    plugins
+        .similar_songs(&plugin_id, track_id.trim(), limit.unwrap_or(30))
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::render_qr_svg;

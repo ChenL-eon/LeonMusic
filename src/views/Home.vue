@@ -22,6 +22,7 @@ const library = useLibraryStore();
 const player = usePlayerStore();
 
 const feed = ref<RecommendFeed | null>(null);
+const toplists = ref<RemotePlaylistMeta[]>([]);
 const loading = ref(false);
 const loadError = ref("");
 const openingId = ref("");
@@ -41,7 +42,13 @@ async function load(silent = false) {
     loadError.value = "";
   }
   try {
-    feed.value = await pluginApi.recommendFeed(NETEASE, 12);
+    // 排行榜与推荐流并行拉取；榜单失败不阻塞首页（静默留空）
+    const [f, tl] = await Promise.all([
+      pluginApi.recommendFeed(NETEASE, 12),
+      pluginApi.toplists(NETEASE).catch(() => [] as RemotePlaylistMeta[]),
+    ]);
+    feed.value = f;
+    toplists.value = tl.slice(0, 12);
     loadedAt = Date.now();
   } catch (e) {
     if (!silent) loadError.value = errorText(e);
@@ -141,6 +148,26 @@ function playTracks(list: Track[], i = 0) {
   }
   void player.playTracks(list, i);
   ui.toast("已开始播放");
+}
+
+/** 私人FM：拉一批口味推荐直接开播。未登录也能试（服务端只给 1 首试听）。 */
+const fmLoading = ref(false);
+async function playFm() {
+  if (fmLoading.value) return;
+  fmLoading.value = true;
+  try {
+    const tracks = await pluginApi.personalFm(NETEASE);
+    if (!tracks.length) {
+      ui.toast("私人FM没有返回歌曲，稍后再试", "info");
+      return;
+    }
+    await player.playTracks(tracks, 0);
+    ui.toast(`私人FM · ${tracks.length} 首`);
+  } catch (e) {
+    ui.toast(errorText(e), "error");
+  } finally {
+    fmLoading.value = false;
+  }
 }
 
 async function openCloudPlaylist(p: RemotePlaylistMeta) {
@@ -259,12 +286,44 @@ function playCount(n: number): string {
           </div>
         </section>
 
+        <section v-if="toplists.length" class="sec">
+          <div class="sec-head">
+            <h2>排行榜</h2>
+            <span class="dim">官方榜单 · 免登录可用</span>
+          </div>
+          <div class="pl-grid toplist-grid">
+            <button
+              v-for="p in toplists"
+              :key="p.id"
+              class="pl-card"
+              :disabled="openingId === p.id"
+              :title="p.name"
+              @click="openCloudPlaylist(p)"
+            >
+              <span class="pl-cover">
+                <CoverArt :cover-url="p.coverUrl" size="100%" radius="var(--r-md, 14px)" />
+                <span class="plays">
+                  <Icon name="play" :size="11" />
+                  {{ playCount(p.trackCount) }}
+                </span>
+                <span v-if="openingId === p.id" class="opening">解析中…</span>
+              </span>
+              <span class="pl-name">{{ p.name }}</span>
+              <span v-if="p.updateFrequency" class="pl-sub">{{ p.updateFrequency }}</span>
+            </button>
+          </div>
+        </section>
+
         <section class="sec">
           <div class="sec-head">
             <h2>{{ songTitle }}</h2>
             <button class="btn ghost" @click="playTracks(songList)">
               <Icon name="play" :size="14" filled />
               播放全部
+            </button>
+            <button class="btn ghost" title="按你的口味随机推几首（登录后效果更好）" @click="playFm">
+              <Icon name="shuffle" :size="14" />
+              私人FM
             </button>
           </div>
           <div class="rows">

@@ -14,6 +14,7 @@ import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
+import { errorText, plugins as pluginsApi } from "@/api/ipc";
 import { qualityTag } from "@/types";
 
 withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false });
@@ -64,7 +65,7 @@ watch(
 );
 onUnmounted(() => document.documentElement.removeAttribute("data-immersive"));
 
-const fav = computed(() => (track.value ? library.favoriteIds.has(track.value.id) : false));
+const fav = computed(() => library.isFav(track.value));
 const speedLabel = computed(() => `${snap.value.speed.toFixed(2)}×`);
 const pitchLabel = computed(() => {
   const v = snap.value.pitchSemitones;
@@ -105,8 +106,44 @@ function cycleRepeat() {
 
 async function toggleFav() {
   if (!track.value) return;
-  const on = await library.toggleFavorite(track.value.id);
+  const on = await library.toggleFavoriteTrack(track.value);
   ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+}
+
+// ---------------------------------------------------------------------------
+// 听相似（网易云插件 2.14.0）：基于当前歌曲拉推荐，追加到队列末尾
+// ---------------------------------------------------------------------------
+
+const similarLoading = ref(false);
+
+async function loadSimilar() {
+  const t = track.value;
+  if (!t || similarLoading.value) return;
+  similarLoading.value = true;
+  try {
+    if (t.source.kind !== "plugin" || !t.pluginTrackId) {
+      ui.toast("本地歌曲暂不支持「听相似」", "info");
+      return;
+    }
+    const items = await pluginsApi.similarSongs(t.source.pluginId, t.pluginTrackId, 12);
+    if (!items.length) {
+      ui.toast("没有找到相似歌曲", "info");
+      return;
+    }
+    // 过滤掉已经在队列里的，避免连点重复堆叠
+    const queued = new Set(player.queue.items.map((x) => x.id));
+    const fresh = items.filter((x) => !queued.has(x.id));
+    if (!fresh.length) {
+      ui.toast("相似歌曲都已经在队列里了", "info");
+      return;
+    }
+    await player.addToQueue(fresh, false);
+    ui.toast(`已把 ${fresh.length} 首相似歌曲加进队列`);
+  } catch (e) {
+    ui.toast(errorText(e), "error");
+  } finally {
+    similarLoading.value = false;
+  }
 }
 
 async function loadOnlineLyrics() {
@@ -226,6 +263,10 @@ function menuAction(fn: () => void) {
             <button class="menu-item" @click="menuAction(loadOnlineLyrics)">
               <Icon name="refresh" :size="16" />
               重新获取歌词
+            </button>
+            <button class="menu-item" :disabled="similarLoading" @click="menuAction(loadSimilar)">
+              <Icon name="waveform" :size="16" />
+              {{ similarLoading ? "正在找相似歌曲…" : "听相似 · 追加推荐进队列" }}
             </button>
           </div>
         </transition>

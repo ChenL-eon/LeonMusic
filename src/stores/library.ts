@@ -8,7 +8,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-import { EVT, library, on, playlist as playlistApi } from "@/api/ipc";
+import { EVT, library, on, playlist as playlistApi, plugins as pluginApi } from "@/api/ipc";
 import type { Playlist, Track } from "@/types";
 
 export const useLibraryStore = defineStore("library", () => {
@@ -88,7 +88,80 @@ export const useLibraryStore = defineStore("library", () => {
   async function toggleFavorite(trackId: string): Promise<boolean> {
     const nowFavorite = await library.toggleFavorite(trackId);
     favorites.value = await library.favorites();
+    // 云端红心联动（网易云插件 2.14.0）：插件曲目在本地收藏/取消的同时，
+    // 把红心同步到音源平台（进「我喜欢的音乐」，计入听歌排行）。
+    // 未登录时插件返回 ok:false + code:301，静默忽略；失败也不影响本地收藏。
+    const t = tracks.value.find((x) => x.id === trackId);
+    if (t && t.source.kind === "plugin" && t.pluginTrackId) {
+      void pluginApi
+        .likeTrack(t.source.pluginId, t.pluginTrackId, nowFavorite)
+        .catch(() => {});
+    }
     return nowFavorite;
+  }
+
+  // -------------------------------------------------------------------------
+  // 云端红心（网易云插件 2.14.0）
+  //
+  // 插件曲目的「喜欢」以云端红心为准（不用先入库，点了立即进网易云
+  // 「我喜欢的音乐」）；本地库已有的曲目同时翻本地收藏，保证收藏页一致。
+  // cloudLiked 以完整 Track.id（"netease:<songId>"）为键缓存云端状态。
+  // -------------------------------------------------------------------------
+  const cloudLiked = ref<Set<string>>(new Set());
+
+  /** cloudLiked 必须整体替换（Set 的 add/delete 不触发 Vue 响应）。 */
+  function cloudMark(trackKey: string, on: boolean) {
+    const next = new Set(cloudLiked.value);
+    if (on) next.add(trackKey);
+    else next.delete(trackKey);
+    cloudLiked.value = next;
+  }
+
+  /** 统一的收藏判定：插件曲目看云端红心 ∪ 本地收藏，本地曲目看本地收藏。 */
+  function isFav(t: Track | null): boolean {
+    if (!t) return false;
+    if (t.source.kind === "plugin" && t.pluginTrackId) {
+      return cloudLiked.value.has(t.id) || favoriteIds.value.has(t.id);
+    }
+    return favoriteIds.value.has(t.id);
+  }
+
+  /** 切歌时刷新云端红心状态（轻量：一次账号红心 id 列表查询）。 */
+  async function refreshCloudLiked(t: Track | null): Promise<void> {
+    if (!t || t.source.kind !== "plugin" || !t.pluginTrackId) return;
+    try {
+      const r = await pluginApi.isLiked(t.source.pluginId, t.pluginTrackId);
+      cloudMark(t.id, r.loggedIn && r.liked);
+    } catch {
+      // 网络失败保持现状，不打断播放
+    }
+  }
+
+  /** 播放条 / 播放页的红心：插件曲目走云端红心，本地曲目走本地收藏。 */
+  async function toggleFavoriteTrack(t: Track | null): Promise<boolean> {
+    if (!t) return false;
+    if (t.source.kind === "plugin" && t.pluginTrackId) {
+      const want = !isFav(t);
+      try {
+        const r = await pluginApi.likeTrack(t.source.pluginId, t.pluginTrackId, want);
+        if (r.ok) {
+          cloudMark(t.id, r.liked);
+        } else if (r.code === 301) {
+          // 未登录：云端做不了，退化为纯本地收藏
+          return toggleFavorite(t.id);
+        }
+      } catch {
+        // 网络失败：本地有这首歌就退化为本地收藏，否则如实反馈失败
+        if (!tracks.value.some((x) => x.id === t.id)) return false;
+        return toggleFavorite(t.id);
+      }
+      // 本地已入库的插件曲目同步翻本地收藏（收藏页显示一致）
+      if (tracks.value.some((x) => x.id === t.id)) {
+        await toggleFavorite(t.id);
+      }
+      return want;
+    }
+    return toggleFavorite(t.id);
   }
 
   async function openPlaylist(id: string) {
@@ -137,6 +210,9 @@ export const useLibraryStore = defineStore("library", () => {
     refresh,
     scan,
     toggleFavorite,
+    isFav,
+    refreshCloudLiked,
+    toggleFavoriteTrack,
     openPlaylist,
     createPlaylist,
     deletePlaylist,

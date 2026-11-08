@@ -22,11 +22,14 @@ const settings = useSettingsStore();
 const ui = useUiStore();
 const { snap, track, isPlaying, progress, displayPosition } = storeToRefs(player);
 
-const fav = computed(() => (track.value ? library.favoriteIds.has(track.value.id) : false));
+const fav = computed(() => library.isFav(track.value));
 /** 实际拿到的音质，不是设置里选的档位。 */
 const quality = computed(() => qualityTag(snap.value.quality));
 /** 音量竖条弹出（hover 音量图标时显示） */
 const volPop = ref(false);
+
+// 切歌时刷新云端红心状态（网易云插件曲目；失败静默）
+watch(track, (t) => void library.refreshCloudLiked(t), { immediate: true });
 
 function fmt(ms: number): string {
   if (!ms || ms < 0) return "0:00";
@@ -54,7 +57,8 @@ async function onVolumeWheel(e: WheelEvent) {
 
 async function toggleFav() {
   if (!track.value) return;
-  await library.toggleFavorite(track.value.id);
+  const on = await library.toggleFavoriteTrack(track.value);
+  if (on) ui.toast("已红心（同步到网易云）");
 }
 
 /** 倍速菜单：0.5x~2x 弹出选择（参考图 3），当前档位高亮。 */

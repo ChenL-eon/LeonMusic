@@ -15,7 +15,7 @@ use crate::models::{PluginInfo, PluginManifest, StreamQuality, Track, TrackSourc
 
 use super::js_runtime;
 use super::protocol::{
-    validate, RemotePlaylistMeta, RemoteTrack, UserPlaylists,
+    validate, LikeCheck, LikeResult, RemotePlaylistMeta, RemoteTrack, UserPlaylists,
 };
 
 /// 随二进制编译进去的插件。用户目录里没有时用来兜底，
@@ -364,10 +364,85 @@ impl PluginManager {
         })
     }
 
+    /// 红心 / 取消红心（进「我喜欢的音乐」，网易云插件 2.14.0）。
+    /// 未登录时插件返回 `ok:false + code:301`，不作为错误上抛。
+    pub async fn like_track(
+        &self,
+        plugin_id: &str,
+        track_id: &str,
+        like: bool,
+    ) -> AppResult<LikeResult> {
+        let value = self
+            .call(
+                plugin_id,
+                "likeTrack",
+                vec![
+                    serde_json::Value::String(track_id.into()),
+                    serde_json::Value::Bool(like),
+                ],
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| AppError::plugin(format!("like track shape: {e}")))
+    }
+
+    /// 查询一首歌是否已被当前账号红心（红心按钮的初始状态）。
+    pub async fn is_liked_track(&self, plugin_id: &str, track_id: &str) -> AppResult<LikeCheck> {
+        let value = self
+            .call(
+                plugin_id,
+                "isLikedTrack",
+                vec![serde_json::Value::String(track_id.into())],
+            )
+            .await?;
+        serde_json::from_value(value).map_err(|e| AppError::plugin(format!("like check shape: {e}")))
+    }
+
+    /// 官方排行榜列表（免登录可用）。榜单 id 是特殊歌单 id，
+    /// 曲目由前端复用 `plugin_cloud_playlist` 拉取。
+    pub async fn toplists(&self, plugin_id: &str) -> AppResult<Vec<RemotePlaylistMeta>> {
+        let value = self.call(plugin_id, "getToplists", vec![]).await?;
+        serde_json::from_value(value).map_err(|e| AppError::plugin(format!("toplist shape: {e}")))
+    }
+
+    /// 私人FM：按账号口味推歌。登录态一次 3 首，匿名 1 首且播放受限。
+    pub async fn personal_fm(&self, plugin_id: &str) -> AppResult<Vec<Track>> {
+        let value = self.call(plugin_id, "getPersonalFm", vec![]).await?;
+        let items: Vec<RemoteTrack> = serde_json::from_value(value)
+            .map_err(|e| AppError::plugin(format!("personal fm shape: {e}")))?;
+        Ok(items
+            .into_iter()
+            .map(|r| remote_to_track(plugin_id, r))
+            .collect())
+    }
+
+    /// 相似歌曲：播放页「听相似」用，免登录可用。
+    pub async fn similar_songs(
+        &self,
+        plugin_id: &str,
+        track_id: &str,
+        limit: u32,
+    ) -> AppResult<Vec<Track>> {
+        let value = self
+            .call(
+                plugin_id,
+                "getSimilarSongs",
+                vec![
+                    serde_json::Value::String(track_id.into()),
+                    serde_json::Value::from(limit),
+                ],
+            )
+            .await?;
+        let items: Vec<RemoteTrack> = serde_json::from_value(value)
+            .map_err(|e| AppError::plugin(format!("similar songs shape: {e}")))?;
+        Ok(items
+            .into_iter()
+            .map(|r| remote_to_track(plugin_id, r))
+            .collect())
+    }
+
     /// 听歌打卡：把一条真实播放同步给音源平台（网易云走 clientlog eapi）。
     /// `listened_ms` 是本次播放累计毫秒；未登录/关闭打卡时插件返回 `ok:false`。
-    pub async fn scrobble(
-        &self,
+    pub async fn scrobble(        &self,
         plugin_id: &str,
         track_id: &str,
         listened_ms: i64,
