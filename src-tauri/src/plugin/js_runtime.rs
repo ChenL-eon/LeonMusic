@@ -924,7 +924,7 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
             "streamResult",
             "unblockOn",
             "isTrialUrlItem",
-            "gdResolve",
+            "miguResolve",
             // 2.14.0：红心 / 排行榜 / 私人FM / 相似歌曲
             "likeTrack",
             "isLikedTrack",
@@ -1546,50 +1546,6 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
         assert_eq!(hi["source"].as_str(), Some("resolved"));
         assert_eq!(hi["format"].as_str(), Some("flac"), "无损档应拿到 FLAC 直链");
         assert_eq!(hi["downgraded"].as_bool(), Some(false));
-    }
-
-    /// 真联网验证酷狗后端（2.15.0，VutronMusic/UNM 链补位源）：
-    /// UNM trackercdn 配方对免费曲仍可用。蔡依林《日不落》在酷狗是免费曲，
-    /// sqhash 实测直出 FLAC；邓紫棋/周杰伦这类独家 VIP 曲 status:2 拿不到，
-    /// 应如实返回 null 而不是抛异常。
-    /// `cargo test --lib netease_kugou_live -- --ignored --nocapture`
-    #[test]
-    #[ignore = "需要联网访问酷狗接口"]
-    fn netease_kugou_live() {
-        let script = include_str!("builtin/netease/index.js");
-        let track = serde_json::json!({
-            "id": "kg-live-1",
-            "title": "日不落",
-            "artist": "蔡依林",
-            "album": "",
-            "durationMs": 239000,
-            "coverUrl": ""
-        });
-
-        // 无损档：酷狗免费曲应能拿到全曲直链（sqhash → flac 或 hq → mp3）
-        let mut cfg = HashMap::new();
-        cfg.insert("unblockQuality".to_string(), "999".to_string());
-        let r = call_function(script, "kgResolve", &[track, serde_json::json!(999)], cfg)
-            .expect("酷狗解析失败");
-        let url = r["url"].as_str().unwrap_or_default().to_string();
-        println!("kgResolve(日不落) -> {r}");
-        assert!(url.starts_with("http"), "酷狗未返回直链: {r}");
-        assert!(url.contains("kugou.com"), "不是酷狗 CDN: {url}");
-        assert!(r["br"].as_u64().unwrap_or(0) > 0, "码率应如实标注: {r}");
-
-        // 独家付费墙曲：status:2 → 返回 null，不能抛异常
-        let vip = serde_json::json!({
-            "id": "kg-live-2",
-            "title": "光年之外",
-            "artist": "邓紫棋",
-            "album": "",
-            "durationMs": 212000,
-            "coverUrl": ""
-        });
-        let none = call_function(script, "kgResolve", &[vip, serde_json::json!(999)], HashMap::new())
-            .expect("付费墙曲应返回 null 而不是异常");
-        println!("kgResolve(光年之外) -> {none:?}");
-        assert!(none.is_null(), "酷狗独家 VIP 曲不应返回直链: {none:?}");
     }
 
     /// 真联网验证推荐聚合（2.6.0）：未登录应返回个性推荐歌单（免登录接口）、

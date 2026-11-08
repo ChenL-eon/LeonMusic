@@ -70,19 +70,11 @@ function configDraft(p: PluginInfo): Record<string, string> {
   return { ...defaults, ...p.config };
 }
 
-/** 凭据归「账号」页、音质归「播放」页、解析链归「播放 → 解析播放源」，
+/** 凭据归「账号」页、音质归「播放」页，
  *  插件配置里不再暴露这些原始输入框。
  *  保存时 draft 仍是全量，所以改其它参数不会把 Cookie / 音质冲掉。 */
 function configFields(p: PluginInfo) {
-  const managed = [
-    "cookie",
-    "level",
-    "unblockQuality",
-    "unblockBackends",
-    "ncmBase",
-    "kgapiBase",
-    "kgapiCookie",
-  ];
+  const managed = ["cookie", "level", "unblockQuality"];
   return p.manifest.config.filter((f) => !managed.includes(f.key));
 }
 
@@ -91,7 +83,7 @@ function configFields(p: PluginInfo) {
 // ---------------------------------------------------------------------------
 
 /** 对标网易云 App「音质选择」的常见档位，下拉里从低到高排列。
- *  实测（`music-api.gdstudio.xyz` br=999 直取 + Range 解 FLAC STREAMINFO）：
+ *  实测（咪咕 h5/v2.4 无损直链 + Range 解 FLAC STREAMINFO）：
  *  同平台解析的 VIP 曲能拿到 44.1kHz/16bit FLAC 全曲，而官方 eapi 对
  *  lossless/hires/jymaster 一律静默降成 320k MP3。所以：
  *   - `br` 是选档时同步写入解析请求的码率（单一决策链，不再各管各的）
@@ -206,178 +198,6 @@ function setUnblockBr(e: Event) {
   const value = (e.target as HTMLSelectElement).value;
   if (value === currentUnblockBr.value) return;
   void patchNeteaseConfig({ unblockQuality: value }, "解析音质已更新，下一首开始生效");
-}
-
-// ---------------------------------------------------------------------------
-// 解析播放源：手动开关 + 排序。数据落在插件配置 unblockBackends（逗号序列），
-// 插件 resolveBackends() 启动解析时按这份序列逐个尝试 —— 全关存 "off"。
-// 列表用本地序列做事实源（乐观更新 + 串行落库队列）：快速连点开关/排序
-// 不会像「busy 直接 return」那样静默丢操作，也不会被 reload 回读覆盖中间态。
-// ---------------------------------------------------------------------------
-
-/** 与插件内置链一致的源元数据；数组顺序 = 默认链顺序。
- *  自建服务（ncm/kgapi）在链头：VutronMusic 同款架构，填了地址才进链。 */
-const BACKEND_SOURCES = [
-  { id: "ncm", name: "自建网易云 API", desc: "api-enhanced 服务（VutronMusic 同款），官方直链" },
-  { id: "kgapi", name: "自建酷狗 API", desc: "KuGouMusicApi 服务，配酷狗 Cookie 可取账号权益内 VIP 曲" },
-  { id: "gd", name: "GD 音乐台", desc: "社区解析，无损优先，可能限流" },
-  { id: "migu", name: "咪咕音乐", desc: "免登录直链，国内直连最稳，可升无损" },
-  { id: "kw", name: "酷我音乐", desc: "128k 直链，轻量兜底" },
-  { id: "kg", name: "酷狗音乐", desc: "免费曲可升 320k/FLAC，独家 VIP 曲拿不到" },
-  { id: "bili", name: "bilibili", desc: "DASH 音频，严格匹配标题并过滤翻唱" },
-] as const;
-
-/** 本地序列事实源：启用源的 id 按播放顺序；null = 尚未从插件配置初始化。 */
-const backendSeq = ref<string[] | null>(null);
-
-/** 串行落库队列 + 待写计数（须先于下方 immediate watch 声明）。 */
-let backendPatchChain: Promise<unknown> = Promise.resolve();
-let backendPending = 0;
-
-function loadBackendSeq() {
-  const p = neteasePlugin.value;
-  if (!p) return;
-  const raw = String(p.config.unblockBackends ?? "").trim();
-  if (!raw) {
-    // 空 = 默认全开、按内置链顺序
-    backendSeq.value = BACKEND_SOURCES.map((b) => b.id);
-  } else if (raw === "off" || raw === "none") {
-    backendSeq.value = [];
-  } else {
-    backendSeq.value = [
-      ...new Set(
-        raw
-          .split(",")
-          .map((s) => s.trim())
-          .filter((id) => BACKEND_SOURCES.some((b) => b.id === id)),
-      ),
-    ];
-  }
-}
-
-/** 插件列表变化（保存后 reload）时回读权威值；有未落库的本地修改时跳过，
- *  等队列清空后的最后一次 reload 再同步（届时库里已是最终值）。 */
-watch(
-  neteasePlugin,
-  () => {
-    if (backendPending > 0) return;
-    loadBackendSeq();
-  },
-  { immediate: true },
-);
-
-/** UI 行：启用的按本地序列在前（行下标即序列下标），禁用的按默认顺序缀后。 */
-const backendRows = computed(() => {
-  const seq = backendSeq.value ?? BACKEND_SOURCES.map((b) => b.id);
-  const on = BACKEND_SOURCES.filter((b) => seq.includes(b.id)).sort(
-    (a, b) => seq.indexOf(a.id) - seq.indexOf(b.id),
-  );
-  const off = BACKEND_SOURCES.filter((b) => !seq.includes(b.id));
-  return [...on, ...off].map((b) => ({ ...b, on: seq.includes(b.id) }));
-});
-
-const backendOnCount = computed(() => (backendSeq.value ?? []).length);
-
-const metingConfigured = computed(() => {
-  const p = neteasePlugin.value;
-  return p ? Boolean(String(configDraft(p).baseUrl ?? "").trim()) : false;
-});
-
-const ncmConfigured = computed(() => {
-  const p = neteasePlugin.value;
-  return p ? Boolean(String(configDraft(p).ncmBase ?? "").trim()) : false;
-});
-
-const kgapiConfigured = computed(() => {
-  const p = neteasePlugin.value;
-  return p ? Boolean(String(configDraft(p).kgapiBase ?? "").trim()) : false;
-});
-
-/** 自建服务地址 / 酷狗 Cookie 的保存：与解析源开关共用同一条串行落库队列，
- *  快速连续改动不会互相覆盖，也不会被 reload 回读冲掉中间态。 */
-function saveSvcField(key: "ncmBase" | "kgapiBase" | "kgapiCookie", e: Event) {
-  const p = neteasePlugin.value;
-  if (!p) return;
-  const el = e.target as HTMLInputElement;
-  const v = el.value.trim();
-  const cur = String(configDraft(p)[key] ?? "").trim();
-  if (v === cur) return;
-  backendPending++;
-  const run = backendPatchChain
-    .then(async () => {
-      const cur2 = neteasePlugin.value;
-      if (!cur2) return;
-      await store.setPluginConfig(cur2.manifest.id, { ...cur2.config, [key]: v });
-      const draft = pluginDraft[cur2.manifest.id];
-      if (draft) draft[key] = v;
-      ui.toast("已保存，下一首解析开始生效", "success");
-    })
-    .catch((err) => ui.toast(errorText(err), "error"))
-    .finally(() => {
-      backendPending--;
-    });
-  backendPatchChain = run;
-}
-
-function serializeBackends(): string {
-  const seq = backendSeq.value ?? [];
-  if (seq.length === 0) return "off";
-  let v = seq.join(",");
-  const p = neteasePlugin.value;
-  if (p) {
-    const base = String(configDraft(p).baseUrl ?? "").trim();
-    if (base) v += `,meting:${base}`;
-  }
-  return v;
-}
-
-/** 把当前本地序列串行写进插件配置。队列执行时才取最新 config 与序列，
- *  连续快速操作也总是落库最终状态。 */
-function pushBackendPatch() {
-  const p = neteasePlugin.value;
-  if (!p) return;
-  backendPending++;
-  qualityBusy.value = true;
-  const run = backendPatchChain
-    .then(async () => {
-      const cur = neteasePlugin.value;
-      if (!cur) return;
-      const value = serializeBackends();
-      await store.setPluginConfig(cur.manifest.id, { ...cur.config, unblockBackends: value });
-      ui.toast(
-        value === "off"
-          ? "已关闭全部播放源：受限歌曲将只播官方试听片段"
-          : "播放源已更新，下一首解析开始生效",
-        "success",
-      );
-    })
-    .catch((e) => ui.toast(errorText(e), "error"))
-    .finally(() => {
-      backendPending--;
-      if (backendPending === 0) qualityBusy.value = false;
-    });
-  backendPatchChain = run;
-}
-
-function toggleBackend(id: string, on: boolean) {
-  const seq = [...(backendSeq.value ?? [])];
-  const i = seq.indexOf(id);
-  // 新启用的源排到链头（刚开启 = 想让它优先试）；禁用再启用同语义
-  if (on && i < 0) seq.unshift(id);
-  if (!on && i >= 0) seq.splice(i, 1);
-  backendSeq.value = seq;
-  pushBackendPatch();
-}
-
-/** 在启用序列内交换相邻位置（禁用行不参与排序）。 */
-function moveBackend(id: string, dir: -1 | 1) {
-  const seq = [...(backendSeq.value ?? [])];
-  const i = seq.indexOf(id);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= seq.length) return;
-  [seq[i], seq[j]] = [seq[j], seq[i]];
-  backendSeq.value = seq;
-  pushBackendPatch();
 }
 
 // 装了新插件 / 重新扫描后，draft 要跟上，否则输入框绑 undefined
@@ -1027,113 +847,6 @@ function goDownload() {
                 </select>
               </div>
 
-              <!-- 解析播放源：开关 + 排序（写插件配置 unblockBackends，逐个尝试） -->
-              <div class="backend-block">
-                <div class="label">
-                  <div>解析播放源</div>
-                  <div class="desc">
-                    受限歌曲按此顺序逐个尝试，可开关与排序；全部关闭后只播官方试听
-                  </div>
-                </div>
-                <div
-                  v-for="(b, i) in backendRows"
-                  :key="b.id"
-                  class="backend-row"
-                  :class="{ off: !b.on }"
-                >
-                  <div class="backend-info">
-                    <div class="backend-name">
-                      {{ b.name }}
-                      <span class="backend-order" v-if="b.on">{{ i + 1 }}</span>
-                    </div>
-                    <div class="desc">{{ b.desc }}</div>
-                  </div>
-                  <div class="backend-ops">
-                    <button
-                      class="mini-btn"
-                      :disabled="!b.on || i === 0"
-                      title="上移"
-                      @click="moveBackend(b.id, -1)"
-                    >↑</button>
-                    <button
-                      class="mini-btn"
-                      :disabled="!b.on || i >= backendOnCount - 1"
-                      title="下移"
-                      @click="moveBackend(b.id, 1)"
-                    >↓</button>
-                    <label class="switch">
-                      <input
-                        type="checkbox"
-                        :checked="b.on"
-                        @change="toggleBackend(b.id, ($event.target as HTMLInputElement).checked)"
-                      />
-                      <span />
-                    </label>
-                  </div>
-                </div>
-                <div class="svc-fields">
-                  <div class="quality-foot-row">
-                    <div class="label">
-                      <div>自建网易云 API（api-enhanced）</div>
-                      <div class="desc">
-                        {{ ncmConfigured
-                          ? "已配置：作为链头第一跳，取官方直链（试听片段自动跳过）"
-                          : "VutronMusic 同款架构；填地址后自动作为链头第一跳，未登录网易也能用服务端 cookie 取全曲" }}
-                      </div>
-                    </div>
-                    <input
-                      class="quality-input"
-                      type="text"
-                      :value="String(configDraft(neteasePlugin!).ncmBase ?? '')"
-                      placeholder="http://127.0.0.1:3010"
-                      spellcheck="false"
-                      @change="saveSvcField('ncmBase', $event)"
-                    />
-                  </div>
-                  <div class="quality-foot-row">
-                    <div class="label">
-                      <div>自建酷狗 API（KuGouMusicApi）</div>
-                      <div class="desc">
-                        {{ kgapiConfigured
-                          ? "已配置：链头第二跳；设备注册自动完成，免费曲免登录"
-                          : "填地址后自动作为链头第二跳；免费曲免登录可取，配酷狗 Cookie 可取账号权益内 VIP 曲" }}
-                      </div>
-                    </div>
-                    <input
-                      class="quality-input"
-                      type="text"
-                      :value="String(configDraft(neteasePlugin!).kgapiBase ?? '')"
-                      placeholder="http://127.0.0.1:3020"
-                      spellcheck="false"
-                      @change="saveSvcField('kgapiBase', $event)"
-                    />
-                  </div>
-                  <div class="quality-foot-row">
-                    <div class="label">
-                      <div>酷狗 Cookie（可选）</div>
-                      <div class="desc">
-                        在自建服务里登录酷狗（验证码 / 扫码接口都有），把返回的
-                        cookie 粘到这里；留空 = 只取免费曲
-                      </div>
-                    </div>
-                    <input
-                      class="quality-input"
-                      type="password"
-                      :value="String(configDraft(neteasePlugin!).kgapiCookie ?? '')"
-                      placeholder="token=...; userid=..."
-                      @change="saveSvcField('kgapiCookie', $event)"
-                    />
-                  </div>
-                </div>
-                <p class="quality-note backend-note">
-                  {{
-                    metingConfigured
-                      ? "已配置 Meting 地址：始终作为链尾兜底追加。"
-                      : "「Meting 地址」填好后会自动作为链尾兜底追加，无需手动排序。"
-                  }}
-                </p>
-              </div>
-
               <div class="quality-foot">
                 <p class="quality-note">
                   <strong>不确保有效</strong>：官方接口按账号权限与版权静默降级，选了「无损」也可能只回
@@ -1422,73 +1135,6 @@ function goDownload() {
   justify-content: space-between;
   gap: 14px;
 }
-/* 解析播放源：可开关、可排序的源列表 */
-.backend-block {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.backend-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--hover) 55%, transparent);
-  transition: opacity 0.15s var(--ease);
-}
-.backend-row.off {
-  opacity: 0.55;
-}
-.backend-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-.backend-order {
-  display: inline-grid;
-  place-items: center;
-  min-width: 17px;
-  height: 17px;
-  margin-left: 6px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--accent);
-  font-size: 10.5px;
-  font-weight: 700;
-  vertical-align: 1px;
-}
-.backend-ops {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-.mini-btn {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  font-size: 14px;
-  line-height: 1;
-  color: var(--text-2);
-  display: grid;
-  place-items: center;
-}
-.mini-btn:hover:not(:disabled) {
-  background: var(--hover);
-  color: var(--text);
-}
-.mini-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-.backend-note {
-  margin-top: 0;
-}
 .quality-level {
   min-width: 260px;
   font-weight: 500;
@@ -1534,21 +1180,10 @@ function goDownload() {
 .quality-input:focus {
   border-color: var(--accent);
 }
-.svc-fields {
-  margin-top: 10px;
-}
-.svc-fields .quality-foot-row + .quality-foot-row {
-  margin-top: 8px;
-}
 @media (max-width: 860px) {
   .quality-input {
     width: 100%;
     max-width: 300px;
-  }
-  .svc-fields .quality-foot-row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
   }
 }
 .quality-note {
