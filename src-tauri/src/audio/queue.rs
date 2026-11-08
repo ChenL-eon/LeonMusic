@@ -67,15 +67,14 @@ impl PlayQueue {
     /// 整体替换队列，`index` 指定要播放的位置（`items` 下标）。
     pub fn set_items(&mut self, items: Vec<Track>, index: Option<usize>) {
         self.items = items;
+        // 先让 order 与 items 对齐，`cursor` 临时按「条目下标」解释，
+        // 交给 rebuild_order 决定随机模式下的落点。
+        self.order = (0..self.items.len()).collect();
+        self.cursor = match index {
+            Some(i) if !self.items.is_empty() => Some(i.min(self.items.len() - 1)),
+            _ => None,
+        };
         self.rebuild_order();
-        self.cursor = index.and_then(|i| {
-            if self.items.is_empty() {
-                None
-            } else {
-                let i = i.min(self.items.len() - 1);
-                self.order.iter().position(|&x| x == i)
-            }
-        });
     }
 
     pub fn clear(&mut self) {
@@ -205,19 +204,22 @@ impl PlayQueue {
     }
 
     fn rebuild_order(&mut self) {
+        // 先按**当前** order 把当前曲目换算成 items 下标。重建后 order 的
+        // 下标含义完全变了（随机打乱），继续拿旧 cursor 去索引会提到别的歌。
+        let pinned = self.cursor.and_then(|c| self.order.get(c).copied());
         self.order = (0..self.items.len()).collect();
         if self.shuffle {
             let mut rng = rand::rng();
             self.order.shuffle(&mut rng);
             // 当前曲目保持在队首，避免开启随机时突然跳走
-            if let Some(c) = self.cursor {
-                if let Some(&cur) = self.order.get(c) {
-                    if let Some(pos) = self.order.iter().position(|&x| x == cur) {
-                        self.order.swap(0, pos);
-                    }
+            if let Some(cur) = pinned {
+                if let Some(pos) = self.order.iter().position(|&x| x == cur) {
+                    self.order.swap(0, pos);
                 }
             }
         }
+        // cursor 必须跟着当前条目走，否则 next/prev 会从旧位置继续
+        self.cursor = pinned.and_then(|cur| self.order.iter().position(|&x| x == cur));
     }
 
     fn restore_cursor_by_track(&mut self, track: Option<Track>) {
@@ -283,6 +285,26 @@ mod tests {
         let mut q = PlayQueue::default();
         q.set_items(vec![track("a"), track("b"), track("c")], Some(0));
         q.remove(0);
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+    }
+
+    #[test]
+    fn set_items_pins_requested_track_when_shuffled() {
+        let mut q = PlayQueue::default();
+        q.set_shuffle(true);
+        q.set_items(vec![track("a"), track("b"), track("c")], Some(1));
+        // 随机模式下当前曲目必须在队首：重建 order 时若拿旧 cursor 当下标，
+        // 提到前面的会是别的歌，这里会退化成 a 或 c。
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+        assert_eq!(q.current_index(), Some(1));
+    }
+
+    #[test]
+    fn push_keeps_current_track_when_shuffled() {
+        let mut q = PlayQueue::default();
+        q.set_shuffle(true);
+        q.set_items(vec![track("a"), track("b")], Some(1));
+        q.push(vec![track("c")], false);
         assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
     }
 }
