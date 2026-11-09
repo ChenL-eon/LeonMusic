@@ -193,19 +193,26 @@ async function preflight(args) {
 
 async function ensureRelease(args, body, target) {
   const name = args.name || args.tag;
+  let existing = null;
   try {
-    const existing = await api("GET", `/releases/tags/${encodeURIComponent(args.tag)}`);
+    existing = await api("GET", `/releases/tags/${encodeURIComponent(args.tag)}`);
+  } catch (e) {
+    if (e.status !== 404) throw e;
+  }
+  // 注意：Gitee 对不存在的 tag 并不总是回 404 —— 实测会回 HTTP 200 + JSON
+  // 字面量 null。只判断 404 会把 null 当成发行版对象，随后 existing.id 直接
+  // 抛 "Cannot read properties of null"。这里两种形态都按"不存在"处理。
+  if (existing && existing.id != null) {
     console.log(`· 发行版 ${args.tag} 已存在（id=${existing.id}），复用并同步标题/描述`);
     try {
-      return await api("PATCH", `/releases/${existing.id}`, {
+      const patched = await api("PATCH", `/releases/${existing.id}`, {
         json: { name, body, prerelease: !!args.prerelease },
       });
+      return patched && patched.id != null ? patched : existing;
     } catch (e) {
       console.warn(`  ! 更新发行版信息失败（不影响附件上传）：${e.message}`);
       return existing;
     }
-  } catch (e) {
-    if (e.status !== 404) throw e;
   }
   const created = await api("POST", "/releases", {
     json: {
@@ -216,8 +223,20 @@ async function ensureRelease(args, body, target) {
       prerelease: !!args.prerelease,
     },
   });
-  console.log(`· 已创建发行版 ${args.tag}（id=${created.id}）`);
-  return created;
+  if (created && created.id != null) {
+    console.log(`· 已创建发行版 ${args.tag}（id=${created.id}）`);
+    return created;
+  }
+  // 少数情况下创建接口会回空响应，回查一次确认到底建没建成
+  const again = await api("GET", `/releases/tags/${encodeURIComponent(args.tag)}`).catch(() => null);
+  if (again && again.id != null) {
+    console.log(`· 已创建发行版 ${args.tag}（回查得到 id=${again.id}）`);
+    return again;
+  }
+  die(
+    `创建发行版 ${args.tag} 后既没拿到响应体，回查也找不到。\n`
+      + "  请到仓库的「发行版」页面确认是否已生成，再决定重跑或手工补传。",
+  );
 }
 
 async function listAssets(releaseId) {
