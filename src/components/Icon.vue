@@ -48,6 +48,9 @@ const PATHS: Record<string, string> = {
   music: "M9 18V6l10-2v12M9 18a3 3 0 11-6 0 3 3 0 016 0zM19 16a3 3 0 11-6 0 3 3 0 016 0z",
   chevron: "M9 6l6 6-6 6",
   "chevron-down": "M6 9l6 6 6-6",
+  /* 列表悬浮按钮：回到顶部 / 定位到当前播放 */
+  "arrow-up": "M12 19V5M5.5 11.5L12 5l6.5 6.5",
+  locate: "M12 3v3M12 18v3M3 12h3M18 12h3M12 8.2a3.8 3.8 0 100 7.6 3.8 3.8 0 000-7.6z",
   minimize: "M6 12h12",
   pin: "M12 17v5M8 3h8l-1 6 3 3v2H6v-2l3-3z",
   plug: "M9 2v6M15 2v6M6 8h12v3a6 6 0 01-12 0zM12 17v5",
