@@ -224,6 +224,12 @@ export const settings = {
   /** Android：跳到系统的应用通知设置页（权限被拒后自救） */
   openNotificationSettings: () => invoke<void>("app_open_notification_settings"),
   dataDir: () => invoke<string>("app_data_dir"),
+  /** 已保存背景图的绝对路径（供 convertFileSrc 转成 asset URL），无图时为空串 */
+  backgroundPath: () => invoke<string>("app_background_path"),
+  /** 传入纯 base64 图片数据，落盘到应用数据目录并广播设置变更 */
+  setBackgroundImage: (data: string) => invoke<Settings>("app_set_background_image", { data }),
+  /** 删除已保存的背景图 */
+  clearBackgroundImage: () => invoke<Settings>("app_clear_background_image"),
 };
 
 /** 与插件无关的网络辅助（宿主命令） */

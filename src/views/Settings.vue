@@ -225,6 +225,94 @@ watch(
 const s = computed(() => store.value);
 const cacheMb = computed(() => (store.cacheBytes / 1024 / 1024).toFixed(1));
 
+// ---------------------------------------------------------------------------
+// 自定义软件背景（桌面 / 移动共用这张卡片，移动端经 MobileSettings 复用本组件）
+// ---------------------------------------------------------------------------
+const bgFile = ref<HTMLInputElement | null>(null);
+const bgBusy = ref(false);
+const BG_MAX_BYTES = 20 * 1024 * 1024;
+
+function pickBg() {
+  bgFile.value?.click();
+}
+
+async function onBgFile(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = ""; // 允许连续选同一个文件
+  if (!file) return;
+  if (file.size > BG_MAX_BYTES) {
+    ui.toast("背景图片不能超过 20 MB", "error");
+    return;
+  }
+  bgBusy.value = true;
+  try {
+    await store.setBackgroundFile(file);
+    ui.toast(
+      s.value.bgEnabled ? "背景图片已更新" : "已保存，打开「使用自定义背景」即可生效",
+      "success",
+    );
+  } catch (err) {
+    ui.toast(errorText(err), "error");
+  } finally {
+    bgBusy.value = false;
+  }
+}
+
+async function clearBg() {
+  bgBusy.value = true;
+  try {
+    await store.clearBackground();
+    ui.toast("已清除背景图片", "success");
+  } catch (err) {
+    ui.toast(errorText(err), "error");
+  } finally {
+    bgBusy.value = false;
+  }
+}
+
+/** 滑块拖动时的本地值：**圆点和右侧数字都读它**。
+ *  以前圆点绑 `s.bgOpacity`、数字绑草稿，而每次 input 都会因为数字变化触发重渲染，
+ *  Vue 又把 `:value` 的旧值写回 input，于是拖动时圆点被弹回原位、松手时 `change`
+ *  读到的还是旧值（整次拖动被丢弃），数字与圆点也对不上。 */
+const bgOpacityDraft = ref(35);
+const bgOpacityDragging = ref(false);
+watch(
+  () => s.value.bgOpacity,
+  (v) => {
+    // 拖动中以手指位置为准：此时任何设置回传都不能把圆点拽走
+    if (bgOpacityDragging.value) return;
+    bgOpacityDraft.value = Math.round(Number(v) || 35);
+  },
+  { immediate: true },
+);
+
+/** 拖动时只改 CSS 变量做实时预览，松手才落盘，避免每个像素都写一次 DB。 */
+function onBgOpacityInput(e: Event) {
+  const v = Number((e.target as HTMLInputElement).value);
+  bgOpacityDragging.value = true;
+  bgOpacityDraft.value = v;
+  document.documentElement.style.setProperty("--bg-image-opacity", String(v / 100));
+}
+
+/** 松手落盘。`change` 与 `pointerup` 都可能触发，用「值没变就不写」去重。 */
+function commitBgOpacity(e: Event) {
+  const v = Math.min(100, Math.max(5, Math.round(Number((e.target as HTMLInputElement).value))));
+  bgOpacityDragging.value = false;
+  bgOpacityDraft.value = v;
+  if (Math.round(Number(s.value.bgOpacity)) === v) return;
+  void set("bgOpacity", v);
+}
+
+function onBgOpacityChange(e: Event) {
+  commitBgOpacity(e);
+}
+
+/** 指针在滑块外抬起时个别 WebView 不补 `change`，这里兜一次。 */
+function onBgOpacityRelease(e: Event) {
+  if (bgOpacityDragging.value) commitBgOpacity(e);
+}
+
 /** 自建流媒体服务（Emby / Jellyfin / Navidrome）与其它音源插件分开两处展示：
  *  「音源插件」页只留公共音源，这三家单独一个页签，默认收起。 */
 const streamPlugins = computed(() =>
@@ -687,6 +775,66 @@ function goDownload() {
               />
               <span />
             </label>
+          </div>
+
+          <!-- 自定义软件背景：桌面 / 移动共用同一张设置卡片 -->
+          <div class="card bg-card">
+            <div class="bg-card-title">自定义背景</div>
+
+            <div class="row">
+              <div class="label">
+                <div>使用自定义背景</div>
+                <div class="desc">用一张图片作为主界面背景。</div>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="s.bgEnabled"
+                  @change="set('bgEnabled', ($event.target as HTMLInputElement).checked)"
+                />
+                <span />
+              </label>
+            </div>
+
+            <div class="row">
+              <div class="label">
+                <div>背景图片</div>
+                <div class="desc">{{ s.bgImage ? "已选择图片" : "未选择图片" }}</div>
+              </div>
+              <div class="bg-actions">
+                <button class="link-btn" :disabled="bgBusy" @click="pickBg">选择图片</button>
+                <button class="link-btn" :disabled="bgBusy || !s.bgImage" @click="clearBg">
+                  清除
+                </button>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="label">
+                <div>图片透明度</div>
+                <div class="desc">
+                  {{ s.bgEnabled ? "数值越大，背景越明显" : "开启自定义背景后可调节。" }}
+                </div>
+              </div>
+              <div class="bg-opacity">
+                <input
+                  type="range"
+                  min="5"
+                  max="100"
+                  step="1"
+                  :value="String(bgOpacityDraft)"
+                  :disabled="!s.bgEnabled"
+                  :style="`--bg-fill:${bgOpacityDraft}%`"
+                  aria-label="图片透明度"
+                  @input="onBgOpacityInput"
+                  @change="onBgOpacityChange"
+                  @pointerup="onBgOpacityRelease"
+                />
+                <span class="bg-opacity-value">{{ bgOpacityDraft }}%</span>
+              </div>
+            </div>
+
+            <input ref="bgFile" type="file" accept="image/*" hidden @change="onBgFile" />
           </div>
         </section>
 
@@ -2115,6 +2263,12 @@ input[type="range"]::-webkit-slider-thumb {
     gap: 10px;
     padding: 13px 14px;
   }
+  /* 控件在标题下方时铺满整行。多带一层 .bg-card 提高特异性：
+     基础样式写在文件末尾，只靠媒体查询的先后顺序会被反覆盖。 */
+  .bg-card .bg-opacity {
+    width: 100%;
+    max-width: 320px;
+  }
   .desc {
     font-size: 11px;
   }
@@ -2280,5 +2434,68 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-3);
+}
+
+/* ---------- 自定义背景卡片 ---------- */
+.bg-card {
+  margin-top: 16px;
+  padding: 4px 8px 10px;
+}
+.bg-card-title {
+  padding: 12px 8px 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.bg-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: none;
+}
+.bg-actions .link-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  text-decoration: none;
+}
+.bg-opacity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  width: 210px;
+}
+.bg-opacity input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+  /* 自定义外观后 Chromium 不再画「已选中」那一段，只剩一个圆点很难看出位置。
+     这里用同一个数值（--bg-fill，来自 bgOpacityDraft）驱动渐变，
+     填充比例与右侧百分比永远同源。 */
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--bg-fill, 35%),
+    var(--border-strong) var(--bg-fill, 35%),
+    var(--border-strong) 100%
+  );
+}
+.bg-opacity input[type="range"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* 圆点和填充段同色，落在分界处会「消失」；描一圈卡片底色把它抠出来。 */
+.bg-opacity input[type="range"]::-webkit-slider-thumb {
+  box-sizing: border-box;
+  border: 2px solid var(--panel);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.2);
+}
+.bg-opacity-value {
+  width: 40px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
 }
 </style>

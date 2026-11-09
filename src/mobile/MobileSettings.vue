@@ -112,6 +112,16 @@ const GROUPS: Group[] = [
         tab: "look",
         focusText: "歌词字号",
       },
+      {
+        id: "background",
+        title: "自定义背景",
+        desc: "背景图片与透明度",
+        icon: "image",
+        color: "#a78bfa",
+        keywords: "背景 自定义背景 壁纸 图片 透明度 主界面 皮肤 选择图片 清除",
+        tab: "look",
+        focusSelector: ".bg-card",
+      },
     ],
   },
   {
@@ -713,8 +723,12 @@ const statusRows = computed(() => [
 }
 .ms-detail :deep(.row),
 .ms-detail :deep(.quality-card),
+.ms-detail :deep(.bg-card),
 .ms-detail :deep(.plugin),
 .ms-detail :deep(.upd-card) {
   border-radius: 16px;
+}
+.ms-detail :deep(.bg-actions) {
+  gap: 12px;
 }
 </style>

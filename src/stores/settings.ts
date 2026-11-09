@@ -4,6 +4,7 @@
  * 主题切换靠 `<html data-theme>` + CSS 变量，不依赖任何 UI 库。
  */
 
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 
@@ -38,6 +39,9 @@ const DEFAULTS: Settings = {
   streamEnabled: false,
   smartQuality: true,
   rememberSearchSource: true,
+  bgEnabled: false,
+  bgImage: "",
+  bgOpacity: 35,
   cacheLimitMb: 2048,
   crossfadeMs: 0,
 };
@@ -66,6 +70,21 @@ function writeSavedSource(id: string | null): void {
   } catch {
     /* 存储不可用时只在本次会话内生效 */
   }
+}
+
+/** File → 纯 base64（不含 data URL 前缀）。
+ *  用 FileReader 而不是 btoa + 字符串拼接：大图分块才不会爆栈，
+ *  而且 Android WebView 与 Windows WebView2 行为一致。 */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result ?? "");
+      resolve(url.slice(url.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
 }
 
 export const useSettingsStore = defineStore("settings", () => {
@@ -153,11 +172,63 @@ export const useSettingsStore = defineStore("settings", () => {
         // 桌面端是空实现，老版本 Android 也可能没有这条命令 —— 不值得打扰用户
       });
     }
+
+    // 自定义背景：透明度与「已启用」标记挂到根元素，main.css 直接消费；
+    // 图片本身由 bgUrl 异步加载，不在这里等 IPC。
+    const opacity = Math.min(100, Math.max(5, Number(value.value.bgOpacity) || 35));
+    root.style.setProperty("--bg-image-opacity", String(opacity / 100));
+    root.toggleAttribute("data-custom-bg", value.value.bgEnabled && !!value.value.bgImage);
   }
 
-  watch(() => [value.value.theme, value.value.accent, value.value.lyricFontSize], applyTheme, {
-    deep: true,
-  });
+  /** 已保存背景图的 asset URL，供 App.vue 的全局背景层使用。 */
+  const bgUrl = ref("");
+
+  async function refreshBackground() {
+    if (!value.value.bgEnabled || !value.value.bgImage) {
+      bgUrl.value = "";
+      return;
+    }
+    try {
+      const path = await settingsApi.backgroundPath();
+      bgUrl.value = path ? convertFileSrc(path) : "";
+    } catch {
+      bgUrl.value = "";
+    }
+  }
+
+  /** 选图：落盘交给 Rust，返回的新 Settings 同步本窗并立刻刷新背景。 */
+  async function setBackgroundFile(file: File) {
+    const data = await fileToBase64(file);
+    const updated = await settingsApi.setBackgroundImage(data);
+    value.value = { ...DEFAULTS, ...updated };
+    applyTheme();
+    await refreshBackground();
+  }
+
+  async function clearBackground() {
+    const updated = await settingsApi.clearBackgroundImage();
+    bgUrl.value = "";
+    value.value = { ...DEFAULTS, ...updated };
+    applyTheme();
+  }
+
+  watch(
+    () => [value.value.bgEnabled, value.value.bgImage],
+    () => void refreshBackground(),
+  );
+
+  watch(
+    () => [
+      value.value.theme,
+      value.value.accent,
+      value.value.lyricFontSize,
+      value.value.bgEnabled,
+      value.value.bgImage,
+      value.value.bgOpacity,
+    ],
+    applyTheme,
+    { deep: true },
+  );
 
   /**
    * 初始化。
@@ -185,6 +256,7 @@ export const useSettingsStore = defineStore("settings", () => {
     value.value = { ...DEFAULTS, ...s };
     platform.value = p;
     applyTheme();
+    await refreshBackground();
     await reloadPlugins();
     // 流媒体默认关闭：插件行在库里默认是「启用」，这里对齐一次。
     // 否则会出现「设置页显示关着、搜索页却还能选到自建服务」的错位。
@@ -198,6 +270,8 @@ export const useSettingsStore = defineStore("settings", () => {
     await on<Settings>(EVT.settingsChanged, (payload) => {
       value.value = { ...DEFAULTS, ...payload };
       applyTheme();
+      // 别的窗口（或本机选图命令）换了图时同步刷新，文件名带时间戳所以会变
+      void refreshBackground();
     });
   }
 
@@ -253,6 +327,10 @@ export const useSettingsStore = defineStore("settings", () => {
     loaded,
     isAndroid,
     supportsLyricWindow,
+    bgUrl,
+    setBackgroundFile,
+    clearBackground,
+    refreshBackground,
     searchSource,
     initSearchSource,
     selectSearchSource,

@@ -60,6 +60,8 @@ watch(
   { immediate: true },
 );
 const nowOpen = computed(() => ui.page === "now");
+/** 全局自定义背景：URL 由 settings store 经 asset 协议解析，透明度走 CSS 变量 */
+const bgStyle = computed(() => ({ backgroundImage: `url("${settingsStore.bgUrl}")` }));
 const currentView = computed(() => views[ui.page === "now" ? lastPage.value : ui.page] ?? HomeView);
 /** 缓存与挂载的 key 用「实际渲染的页」而不是 ui.page：
  *  打开播放覆盖层时 key 不变，衬底的页面不会重挂载。 */
@@ -117,6 +119,7 @@ async function toggleLyricWindow() {
 
 <template>
   <div class="app-root">
+    <div v-if="settingsStore.bgUrl" class="app-bg" :style="bgStyle" aria-hidden="true" />
     <MobileShell v-if="isMobile" :booting="booting" :show-boot="showBoot" :boot-error="bootError" />
 
     <div v-else class="shell">

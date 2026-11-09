@@ -295,6 +295,12 @@ export interface Settings {
   smartQuality: boolean;
   /** 记住搜索平台：重启后恢复上次选中的搜索音源，默认开启 */
   rememberSearchSource: boolean;
+  /** 自定义软件背景：总开关 */
+  bgEnabled: boolean;
+  /** 已保存的背景图文件名，空串表示未选择 */
+  bgImage: string;
+  /** 背景图不透明度百分比 5–100 */
+  bgOpacity: number;
   cacheLimitMb: number;
   crossfadeMs: number;
 }

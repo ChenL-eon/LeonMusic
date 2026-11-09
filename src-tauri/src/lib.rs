@@ -328,6 +328,9 @@ pub fn run() {
             commands::app_media_status,
             commands::app_set_media_options,
             commands::app_open_notification_settings,
+            commands::app_background_path,
+            commands::app_set_background_image,
+            commands::app_clear_background_image,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build LeonMusic")

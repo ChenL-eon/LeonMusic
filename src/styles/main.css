@@ -43,6 +43,9 @@
   --lyric-size-user: 34px;
   --lyric-size: var(--lyric-size-user);
 
+  /* 自定义背景图的不透明度，由 settings store 按设置值改写 */
+  --bg-image-opacity: 0.35;
+
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -122,6 +125,29 @@ body {
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
   overscroll-behavior: none;
+}
+
+/* 自定义软件背景。
+   z-index:-1 让它落在根层叠上下文：body 背景之上、普通内容之下，
+   既不挡交互，也不会被 .app-root 里那些透明容器吃掉。 */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  opacity: var(--bg-image-opacity, 0.35);
+}
+
+/* 开了背景图时，几块近不透明的底衬再让出一点通透度 */
+html[data-custom-bg] .m-sub {
+  background-color: color-mix(in srgb, var(--bg) 84%, transparent);
+}
+html[data-custom-bg] .titlebar,
+html[data-custom-bg] .player-bar {
+  backdrop-filter: blur(16px);
 }
 
 /* 只在触摸设备上禁选：桌面上还要能复制歌名/路径 */

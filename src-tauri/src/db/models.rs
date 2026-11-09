@@ -734,6 +734,12 @@ pub struct Settings {
     /// 重启后恢复；关闭则每次启动回落到默认音源（网易云）。
     /// 只控制「是否记住」，音源值本身是纯 UI 偏好，不进设置库。
     pub remember_search_source: bool,
+    /// 自定义软件背景：总开关。
+    pub bg_enabled: bool,
+    /// 已保存到 appData/backgrounds 的图片文件名，空串表示未选择。
+    pub bg_image: String,
+    /// 背景图不透明度百分比（5–100），35 = 淡淡铺一层不挡文字。
+    pub bg_opacity: f32,
     pub cache_limit_mb: u64,
     pub crossfade_ms: u32,
 }
@@ -768,6 +774,9 @@ impl Default for Settings {
             stream_enabled: false,
             smart_quality: true,
             remember_search_source: true,
+            bg_enabled: false,
+            bg_image: String::new(),
+            bg_opacity: 35.0,
             cache_limit_mb: 2048,
             crossfade_ms: 0,
         }
@@ -896,5 +905,24 @@ mod tests {
         // 回写时新字段要出现在 JSON 里，前端才能读到
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["rememberSearchSource"], true);
+    }
+
+    #[test]
+    fn custom_background_defaults_for_existing_installs() {
+        // 老存档没有 bg* 三个键：应回落到「关闭 / 无图 / 35%」，
+        // 而不是因为缺字段导致整份设置反序列化失败或背景意外打开。
+        let legacy = serde_json::json!({
+            "theme": "light",
+            "smartQuality": false,
+            "cacheLimitMb": 1024
+        });
+        let s: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(!s.bg_enabled);
+        assert_eq!(s.bg_image, "");
+        assert_eq!(s.bg_opacity, 35.0);
+        assert!(!s.smart_quality, "已有字段不被默认值覆盖");
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["bgEnabled"], false);
+        assert_eq!(json["bgOpacity"], 35.0);
     }
 }
