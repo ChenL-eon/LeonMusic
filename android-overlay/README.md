@@ -16,7 +16,9 @@ npm run android:dev
 ```
 
 `apply.py` 是完全幂等的，重复跑不会产生重复节点；`--dry-run` 可以先看会改什么。
-被覆盖的既有文件（比如 Tauri 生成的 `MainActivity.kt`）会先备份成 `*.orig`。
+被覆盖的既有文件（比如 Tauri 生成的 `MainActivity.kt`）会先备份到
+`gen/android/.overlay-backup/`。备份不能留在 `res/` 下：AGP 的资源合并只接受
+`.png` / `.xml`，`ic_launcher.png.orig` 会让整个 APK 构建失败。
 
 ## 文件职责
 

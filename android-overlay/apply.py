@@ -7,7 +7,7 @@ Tauri 的 `android init` 会生成 `src-tauri/gen/android/`，而这个目录是
 
 做的事：
 1. 复制 `android-overlay/app/src/main/java/**` → `gen/android/app/src/main/java/**`
-   （已存在的文件先备份成 `*.orig`，方便对比 Tauri 模板改动）
+   （已存在的文件先备份到 `gen/android/.overlay-backup/`，方便对比 Tauri 模板改动）
 2. 把 `manifest/permissions.xml` 插到 `<manifest>` 下
 3. 把 `manifest/application-children.xml` 插到 `<application>` 内
 4. 把 `manifest/media-button-receiver.xml` 插到 `<application>` 内（媒体键广播）
@@ -50,6 +50,15 @@ def copy_sources(project: Path, dry: bool) -> int:
     if not target.is_dir():
         raise SystemExit(f"找不到 {target}，请先执行 `npm run android:init`")
 
+    # 旧版本把备份写成 `<目标文件>.orig`，与目标同目录。图标落在 res/mipmap-*/
+    # 时，AGP 的资源合并会直接拒绝非 .png/.xml 文件名（The file name must end
+    # with .xml or .png），整包构建失败。这里先清掉历史残留，再把新备份统一
+    # 放到工程根的 .overlay-backup/ 下（不在资源扫描范围内）。
+    for stale in sorted(target.rglob("*.orig")):
+        log(f"- 清理历史备份 {stale.relative_to(target)}")
+        if not dry:
+            stale.unlink()
+
     changed = 0
     for src in sorted(SRC_MAIN.rglob("*")):
         if not src.is_file():
@@ -61,10 +70,11 @@ def copy_sources(project: Path, dry: bool) -> int:
             continue
 
         if dst.exists():
-            backup = dst.with_name(dst.name + ".orig")
+            backup = project / ".overlay-backup" / rel
             if not backup.exists():
-                log(f"! 备份 {rel} -> {backup.name}")
+                log(f"! 备份 {rel} -> .overlay-backup/{rel}")
                 if not dry:
+                    backup.parent.mkdir(parents=True, exist_ok=True)
                     backup.write_bytes(dst.read_bytes())
 
         log(f"+ {rel}")
