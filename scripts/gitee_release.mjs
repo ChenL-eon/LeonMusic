@@ -30,6 +30,8 @@
  *      （先删旧附件再传，否则 Gitee 上会留下两份同名文件）。
  */
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 
 const API = (process.env.GITEE_API || "https://gitee.com/api/v5").replace(/\/+$/, "");
@@ -252,12 +254,75 @@ async function listAssets(releaseId) {
   return out;
 }
 
-async function uploadAsset(releaseId, filePath) {
+/**
+ * 上传附件。
+ *
+ * 不用内置 fetch：undici 只给 5 分钟等响应头（headersTimeout），而 GitHub
+ * 的美国 runner 往 Gitee 传 20MB+ 的 APK 往往更久，实测直接
+ * `UND_ERR_HEADERS_TIMEOUT`。这里改成 https.request 流式发送，只设 socket
+ * 空闲超时——只要数据还在走就不会被打断。
+ */
+function uploadAsset(releaseId, filePath) {
   const name = path.basename(filePath);
-  const form = new FormData();
-  form.append("access_token", TOKEN);
-  form.append("file", new Blob([fs.readFileSync(filePath)]), name);
-  return api("POST", `/releases/${releaseId}/attach_files`, { form });
+  const boundary = `----leonmusic${Date.now().toString(16)}`;
+  const head = Buffer.from(
+    `--${boundary}\r\n`
+      + 'Content-Disposition: form-data; name="access_token"\r\n\r\n'
+      + `${TOKEN}\r\n`
+      + `--${boundary}\r\n`
+      + `Content-Disposition: form-data; name="file"; filename="${name}"\r\n`
+      + "Content-Type: application/octet-stream\r\n\r\n",
+    "utf8",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+  const size = fs.statSync(filePath).size;
+  const qs = new URLSearchParams({ access_token: TOKEN }).toString();
+  const url = new URL(
+    `${API}/repos/${encodeURIComponent(OWNER)}/${encodeURIComponent(REPO)}`
+      + `/releases/${releaseId}/attach_files?${qs}`,
+  );
+
+  return new Promise((resolve, reject) => {
+    const mod = url.protocol === "https:" ? https : http;
+    const req = mod.request(
+      {
+        method: "POST",
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": head.length + size + tail.length,
+        },
+        timeout: 900_000, // 空闲 15 分钟；慢速但仍在传时不触发
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (body += c));
+        res.on("end", () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              resolve(body ? JSON.parse(body) : null);
+            } catch {
+              resolve(body);
+            }
+            return;
+          }
+          const err = new Error(`POST attach_files → HTTP ${res.statusCode}：${body.slice(0, 400)}`);
+          err.status = res.statusCode;
+          reject(err);
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error("上传超时：15 分钟无数据流动")));
+    req.on("error", reject);
+    req.write(head);
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("end", () => req.end(tail));
+    stream.pipe(req, { end: false });
+  });
 }
 
 function defaultBody(args) {
