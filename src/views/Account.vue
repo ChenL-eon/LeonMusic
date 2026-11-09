@@ -420,7 +420,9 @@ const pendingImport = ref<{ pluginId: string; cloudId: string; label: string } |
 const linkImport = reactive({ text: "", busy: false });
 
 /** 旧版本导入的 QQ 歌单曲目封面为空：留一个手动补全入口，
- *  正常情况下启动时会自动补一次，这里供离线升级后立刻重试。 */
+ *  正常情况下启动时会自动补一次，这里供离线升级后立刻重试。
+ *  已有封面的清晰度升级（300 → 800）由 Rust 端建库迁移自动完成；
+ *  这个按钮重拉云端详情，也会顺带把旧尺寸刷成新的。 */
 const backfilling = ref(false);
 const hasQqImported = computed(() =>
   library.playlists.some((p) => (p.remoteKey ?? "").startsWith("netease:qq:")),
@@ -474,14 +476,15 @@ async function loadCloudIfLoggedIn(id: string) {
   if (acct(id).loggedIn) await loadCloud(id);
 }
 
-/** 把云端曲目写进本地库，返回 Track 列表 */
-async function fetchCloudTracks(pluginId: string, cloudId: string, hint: string) {
+/** 只拉云端歌单详情，**不写库**。
+ *  写库时机交给调用方：导入先建本地歌单再落曲目，中途失败不会在库里
+ *  留下既不属于歌单、曲库也看不到的孤儿曲目（这类残渣由启动清理兜底）。 */
+async function fetchCloudDetail(pluginId: string, cloudId: string, hint: string) {
   const detail = await pluginApi.cloudPlaylist(pluginId, cloudId);
   if (!detail.tracks.length) {
     ui.toast(`${hint} 里没有拿到曲目（可能内容为空或接口分页限制）`, "info");
     return null;
   }
-  await libraryApi.upsertTracks(detail.tracks);
   return detail;
 }
 
@@ -490,8 +493,10 @@ async function syncLiked(pluginId: string, liked: RemotePlaylistMeta) {
   if (importing.value) return;
   importing.value = liked.id;
   try {
-    const detail = await fetchCloudTracks(pluginId, liked.id, `「${liked.name}」`);
+    const detail = await fetchCloudDetail(pluginId, liked.id, `「${liked.name}」`);
     if (!detail) return;
+    // 收藏要按 id 关联，所以先把曲目写进库，再补差集到系统歌单
+    await libraryApi.upsertTracks(detail.tracks);
     const favIds = new Set(await libraryApi.favorites().then((fs) => fs.map((f) => f.id)));
     const fresh = detail.tracks.filter((t) => !favIds.has(t.id)).map((t) => t.id);
     if (!fresh.length) {
@@ -525,19 +530,30 @@ function confirmImport() {
   if (p) void importCore(p.pluginId, p.cloudId, p.label);
 }
 
-/** 真正的导入：拉详情 → 入库 → 新建本地歌单（记封面 + remoteKey）→ 挂曲目 */
+/** 真正的导入：拉详情 → 先建本地歌单 → 写曲目 → 记封面 + remoteKey → 挂曲目。
+ *  顺序是刻意的：歌单壳先落地，后面任何一步失败都能把它删掉回滚；
+ *  反过来（先写曲目再建歌单）失败时曲目会永久留在库里，界面上又看不到。 */
 async function importCore(pluginId: string, cloudId: string, label: string) {
   if (importing.value) return;
   importing.value = cloudId;
   try {
-    const detail = await fetchCloudTracks(pluginId, cloudId, label);
+    const detail = await fetchCloudDetail(pluginId, cloudId, label);
     if (!detail) return;
     const local = await playlistApi.create(detail.name);
-    // 云端封面记到本地歌单上（侧栏缩略图 /「我的」页有图可看）；
-    // remoteKey 是「已导入过」的持久标记，重启后仍能识别
-    if (detail.coverUrl) await playlistApi.setCover(local.id, detail.coverUrl);
-    await playlistApi.setRemoteKey(local.id, `${pluginId}:${cloudId}`);
-    await playlistApi.add(local.id, detail.tracks.map((t) => t.id));
+    try {
+      await libraryApi.upsertTracks(detail.tracks);
+      // 云端封面记到本地歌单上（侧栏缩略图 /「我的」页有图可看）
+      if (detail.coverUrl) await playlistApi.setCover(local.id, detail.coverUrl);
+      await playlistApi.add(local.id, detail.tracks.map((t) => t.id));
+      // remoteKey 最后写：它是「已导入过」的持久标记，只有曲目真的挂上去了才落，
+      // 这样中途崩溃顶多留一个普通空歌单，不会变成「已导入但没有歌」的死状态
+      await playlistApi.setRemoteKey(local.id, `${pluginId}:${cloudId}`);
+    } catch (e) {
+      // 回滚空壳歌单。已写入的曲目如果没挂上任何歌单，会在下次启动时
+      // 被孤儿清理回收（见 Db::open），这里不逐条删，避免误删用户已有曲目。
+      await playlistApi.remove(local.id).catch(() => {});
+      throw e;
+    }
     // setCover / setRemoteKey 不触发 libraryChanged，主动刷一次
     await library.refresh();
     ui.toast(`已导入「${detail.name}」${detail.tracks.length} 首到本地歌单`, "success");

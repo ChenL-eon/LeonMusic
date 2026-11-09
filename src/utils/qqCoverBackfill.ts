@@ -9,6 +9,10 @@
  * 只 upsert 有封面的曲目（ON CONFLICT 会覆盖 cover_url），不新建歌单、
  * 不改歌单成员，也不碰任何账号。成功才写标记；离线 / 接口波动时不写，
  * 下次启动自动重试。账号页另有手动按钮可立即触发。
+ *
+ * 注意：只负责「封面为空」的补全。已有封面从 300×300 升到 800×800 的
+ * 清晰度升级由 Rust 端 `Db::open` 的幂等 SQL 迁移完成（不需要联网），
+ * 所以这里的标记保持 v1、不要随便升级后重跑一遍云端拉取。
  */
 
 import { library as libraryApi, plugins as pluginApi } from "@/api/ipc";
