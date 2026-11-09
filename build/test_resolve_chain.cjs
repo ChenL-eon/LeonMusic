@@ -518,8 +518,8 @@ ok(gdCalls === gdBefore,
       logo: 'http://p.qpic.cn/music_cover/abc/300',
       songnum: 2,
       songlist: [
-        { songmid: '003Et45Q22uBOv', songname: '寻不回', singer: [{ name: '小羊阿旸' }], albumname: '寻不回', interval: 217 },
-        { songmid: '001wldka157dWs', songname: '永远在身边', singer: [{ name: '大嘴巴' }, { name: '嘉宾' }], albumname: '王元 口力口', interval: 280 },
+        { songmid: '003Et45Q22uBOv', songname: '寻不回', singer: [{ name: '小羊阿旸' }], albumname: '寻不回', albummid: '002JHJdH2LqxOi', interval: 217 },
+        { songmid: '001wldka157dWs', songname: '永远在身边', singer: [{ name: '大嘴巴' }, { name: '嘉宾' }], albumname: '王元 口力口', albummid: '003TdIgo0sPm0U', interval: 280 },
       ],
     }],
   });
@@ -541,6 +541,34 @@ ok(gdCalls === gdBefore,
     'interval 秒换成毫秒');
   ok(pl && pl.tracks[1].artist === '大嘴巴 / 嘉宾',
     '多歌手用「 / 」拼接，与网易云的展示一致');
+  ok(pl && pl.tracks[0].coverUrl ===
+    'https://y.gtimg.cn/music/photo_new/T002R300x300M000002JHJdH2LqxOi.jpg',
+    '曲目封面按 albummid 拼 CDN 地址，不是留空');
+  ok(pl && pl.tracks[1].coverUrl.indexOf('003TdIgo0sPm0U') > 0 &&
+    pl.tracks[1].coverUrl !== pl.tracks[0].coverUrl,
+    '每首用各自的专辑封面，不是共用歌单封面');
+}
+
+// ---- 18b. 外部歌单：缺 albummid 的老歌退回歌单封面 ----
+{
+  const QQ_NO_ALBUM = JSON.stringify({
+    code: 0,
+    cdlist: [{
+      dissname: '老歌合集',
+      logo: 'http://p.qpic.cn/music_cover/abc/300',
+      songnum: 1,
+      songlist: [
+        { songmid: '00oldSong', songname: '老歌', singer: [{ name: '某人' }], albumname: '老专辑', interval: 200 },
+      ],
+    }],
+  });
+  httpHandlers = [
+    { test: (u) => u.indexOf('fcg_ucc_getcdinfo_byids_cp') >= 0, respond: () => ({ body: QQ_NO_ALBUM }) },
+    { test: () => true, respond: () => ({ body: '{}' }) },
+  ];
+  const pl = api.getPlaylist('qq:999');
+  ok(pl && pl.tracks[0].coverUrl === 'https://p.qpic.cn/music_cover/abc/300',
+    '缺 albummid 时退回歌单封面（http 升级成 https），不留空占位');
 }
 
 // ---- 19. 外部歌单曲目开播：走酷我 / 咪咕解析链 ----

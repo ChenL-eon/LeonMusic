@@ -1204,8 +1204,9 @@ function getPlaylist(id) {
 //
 // 2026-11-09 实测：`fcg_ucc_getcdinfo_byids_cp.fcg` 匿名可读公开歌单，
 // 带 `Referer: https://y.qq.com/portal/playlist.html` 就能拿到歌单名、
-// 封面与全量曲目（songname / singer / albumname / interval / songmid），
-// 不需要登录，也不会往任何账号写东西——导入只落本地库。
+// 封面与全量曲目（songname / singer / albumname / interval / songmid /
+// albummid），不需要登录，也不会往任何账号写东西——导入只落本地库。
+// 曲目不给现成图片 URL，但每首都带 albummid，可拼出专辑封面。
 //
 // 播放侧拿不到 QQ 的 vkey（匿名 uin=0 被服务端判 500003/860100001），
 // 所以曲目 id 记成 `qq:<songmid>`，开播时按「歌名 + 歌手」去酷我 BD /
@@ -1213,6 +1214,17 @@ function getPlaylist(id) {
 
 var QQ_DISS_API =
   'https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg';
+
+/** 专辑封面 CDN。歌单曲目只有 albummid，没有现成图片地址；
+ *  用 songmid 拼会 404（2026-11-09 实测），必须用专辑 mid。
+ *  y.gtimg.cn 不需要 Referer，直出 JPEG；1292 首样本 albummid 覆盖率 100%。
+ *  与独立 qq 插件的 coverUrl 保持一致，改域名时两处都要动。 */
+function qqCoverUrl(song) {
+  var mid = song.albummid ||
+    (song.album && (song.album.mid || song.album.pmid)) || '';
+  if (!mid) return '';
+  return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + mid + '.jpg';
+}
 
 function qqPlaylist(disstid) {
   var url =
@@ -1235,6 +1247,8 @@ function qqPlaylist(disstid) {
   }
 
   var songs = cd.songlist || [];
+  // 极少数老歌可能缺 albummid：至少退回歌单封面，别让列表里全是无图占位符
+  var fallbackCover = httpsUrl(cd.logo || '');
   var tracks = [];
   for (var i = 0; i < songs.length; i++) {
     var s = songs[i] || {};
@@ -1246,8 +1260,7 @@ function qqPlaylist(disstid) {
       artist: artistNames(s.singer),
       album: s.albumname || (s.album && s.album.name) || '',
       durationMs: (Number(s.interval) || 0) * 1000,
-      // 歌单接口不回单曲封面；宿主会退回歌单封面，这里留空免一次请求
-      coverUrl: ''
+      coverUrl: qqCoverUrl(s) || fallbackCover
     });
   }
   if (!tracks.length) throw new Error('QQ 音乐歌单里没有可导入的曲目');

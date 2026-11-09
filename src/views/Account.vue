@@ -15,6 +15,7 @@ import Icon from "@/components/Icon.vue";
 import { errorText, library as libraryApi, net as netApi, playlist as playlistApi, plugins as pluginApi } from "@/api/ipc";
 import type { PluginAccount, PluginInfo, RemotePlaylistMeta } from "@/types";
 import { neteasePlaylistIdFromUrl, parsePlaylistLink, qqPlaylistIdFromUrl } from "@/utils/playlistLink";
+import { backfillQqCovers } from "@/utils/qqCoverBackfill";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
@@ -418,6 +419,30 @@ const pendingImport = ref<{ pluginId: string; cloudId: string; label: string } |
 /** 歌单链接导入（网易云歌单详情接口免登录可用，未登录也能导入公开歌单） */
 const linkImport = reactive({ text: "", busy: false });
 
+/** 旧版本导入的 QQ 歌单曲目封面为空：留一个手动补全入口，
+ *  正常情况下启动时会自动补一次，这里供离线升级后立刻重试。 */
+const backfilling = ref(false);
+const hasQqImported = computed(() =>
+  library.playlists.some((p) => (p.remoteKey ?? "").startsWith("netease:qq:")),
+);
+async function runBackfill() {
+  if (backfilling.value) return;
+  backfilling.value = true;
+  try {
+    const r = await backfillQqCovers(true);
+    ui.toast(
+      r.tracks > 0
+        ? `已为 ${r.playlists} 个 QQ 音乐歌单补全 ${r.tracks} 首封面`
+        : "没有需要补全的封面（这些歌单的曲目都已有封面）",
+      r.tracks > 0 ? "success" : "info",
+    );
+  } catch (e) {
+    ui.toast(errorText(e), "error");
+  } finally {
+    backfilling.value = false;
+  }
+}
+
 function cloudOf(id: string): CloudState {
   return (
     cloud[id] ?? { loggedIn: false, loading: false, error: "", liked: null, playlists: [] }
@@ -721,6 +746,12 @@ onActivated(() => {
           </div>
           <div class="li-hint">
             支持网易云（完整链 / 163cn.tv 短链）与 QQ 音乐（网页链 / 分享页 / 短链）；只导入到本地歌单，不同步到任何账号。酷狗 / 酷我 / 咪咕 / B 站暂未适配。
+          </div>
+          <div v-if="hasQqImported" class="li-tools">
+            <button class="btn ghost small" :disabled="backfilling" @click="runBackfill">
+              {{ backfilling ? "补全中…" : "补全已导入歌单封面" }}
+            </button>
+            <span>旧版导入的 QQ 歌单若没有单曲封面，点这里补一次</span>
           </div>
         </div>
 
@@ -1112,6 +1143,18 @@ onActivated(() => {
   color: var(--text-3);
   margin-top: 8px;
   line-height: 1.6;
+}
+.li-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+.li-tools span {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.5;
 }
 
 /* ---------- 云端歌单 ---------- */

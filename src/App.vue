@@ -22,6 +22,7 @@ import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore, type Page } from "@/stores/ui";
+import { backfillQqCovers } from "@/utils/qqCoverBackfill";
 
 const ui = useUiStore();
 const player = usePlayerStore();
@@ -83,10 +84,17 @@ onMounted(async () => {
     await settingsStore.init();
     // 曲库是启动里最重的一步（最多 200 首 Track 要过 IPC），不再挡首屏：
     // 与播放器并行，首页用 library.ready 自己显示骨架，数据到了直接填充。
-    library.init().catch((e) => {
-      console.error(e);
-      ui.toast(`读取曲库失败：${e}`, "error");
-    });
+    library
+      .init()
+      .then(() => {
+        // 旧版导入的 QQ 歌单曲目封面为空：曲库读完后做一次性回填，
+        // 不阻塞首屏；离线 / 接口波动时静默失败，下次启动自动重试。
+        void backfillQqCovers().catch(() => {});
+      })
+      .catch((e) => {
+        console.error(e);
+        ui.toast(`读取曲库失败：${e}`, "error");
+      });
     await player.init();
   } catch (e) {
     bootError.value = String(e);

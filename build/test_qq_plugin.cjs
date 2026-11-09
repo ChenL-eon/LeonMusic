@@ -117,7 +117,7 @@ let r = api.search('晴天 周杰伦', 2, 40);
 ok(r.length === 1, '返回 1 首');
 ok(r[0].id === '0039MnYb0qxYhV' && r[0].title === '晴天' && r[0].artist === '周杰伦', 'id / 歌名 / 歌手');
 ok(r[0].album === '叶惠美' && r[0].durationMs === 269000, '专辑 / 时长（秒→毫秒）');
-ok(r[0].coverUrl === 'https://y.qq.com/music/photo_new/T002R300x300M000000MkMni19ClKG.jpg', '封面 URL 拼接');
+ok(r[0].coverUrl === 'https://y.gtimg.cn/music/photo_new/T002R300x300M000000MkMni19ClKG.jpg', '封面 URL 拼接（CDN 域名，无需 Referer）');
 ok(api.search('', 1, 30).length === 0, '空关键词不发请求');
 
 // ---------------------------------------------------------------------------

@@ -79,9 +79,12 @@ function streamResult(url, q) {
   return out;
 }
 
+/** 专辑封面 CDN：不需要 Referer，直出 JPEG。
+ *  必须用 albummid（用 songmid 拼会 404）。与 netease 插件外部歌单分支的
+ *  qqCoverUrl 保持一致，改域名 / 尺寸时两处都要动。 */
 function coverUrl(albumMid) {
   if (!albumMid) return '';
-  return 'https://y.qq.com/music/photo_new/T002R300x300M000' + albumMid + '.jpg';
+  return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + albumMid + '.jpg';
 }
 
 function singerNames(list) {
