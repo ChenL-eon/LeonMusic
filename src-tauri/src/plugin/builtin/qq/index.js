@@ -80,11 +80,12 @@ function streamResult(url, q) {
 }
 
 /** 专辑封面 CDN：不需要 Referer，直出 JPEG。
- *  必须用 albummid（用 songmid 拼会 404）。与 netease 插件外部歌单分支的
- *  qqCoverUrl 保持一致，改域名 / 尺寸时两处都要动。 */
+ *  必须用 albummid（用 songmid 拼会 404）。取 800×800：300 在播放页 /
+ *  高 DPI 屏上发糊，1000 会 404，1500 单张约 550 KB 太重。与 netease
+ *  插件外部歌单分支的 qqCoverUrl 保持一致，改域名 / 尺寸时两处都要动。 */
 function coverUrl(albumMid) {
   if (!albumMid) return '';
-  return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + albumMid + '.jpg';
+  return 'https://y.gtimg.cn/music/photo_new/T002R800x800M000' + albumMid + '.jpg';
 }
 
 function singerNames(list) {
@@ -234,9 +235,11 @@ function base64Decode(s) {
   return leon.crypto.utf8Decode(out.join(''));
 }
 
-/** 协议入口：歌词。track.id 是 songmid（宿主传 pluginTrackId）。 */
+/** 协议入口：歌词。track.id 是 songmid（宿主传 pluginTrackId）。
+ *  QQ 歌单导入的曲目由 netease 插件收录，id 会带 `qq:` 前缀；宿主改派时
+ *  通常已剥掉，但这里再做一次兜底，避免别的入口直接传全 id 时查不到词。 */
 function getLyric(track) {
-  var mid = String((track && track.id) || '');
+  var mid = String((track && track.id) || '').replace(/^qq:/, '');
   if (!mid) return '';
   var d = null;
   try {

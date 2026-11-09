@@ -1732,4 +1732,25 @@ ncaTWz7OBGLbCiK45wIDAQAB\n\
         assert_eq!(data["loggedIn"].as_bool(), Some(false));
         assert!(data["playlists"].as_array().unwrap_or(&vec![]).is_empty());
     }
+
+    /// QQ 歌单导入曲目在 Boa 沙箱里真联网取歌词：纯 songmid 与带 `qq:`
+    /// 前缀的导入曲目都必须拿到 LRC。宿主会把前缀剥掉，插件自己也要兜底。
+    /// `cargo test --lib qq_lyric_live -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要联网访问 u.y.qq.com"]
+    fn qq_lyric_live_for_imported_track() {
+        let script = include_str!("builtin/qq/index.js");
+        for id in ["0039MnYb0qxYhV", "qq:0039MnYb0qxYhV"] {
+            let value = call_function(
+                script,
+                "getLyric",
+                &[serde_json::json!({ "id": id })],
+                HashMap::new(),
+            )
+            .unwrap_or_else(|e| panic!("取 QQ 歌词失败（{id}）：{}", e.detail()));
+            let lrc = value.as_str().unwrap_or_default();
+            println!("{id} -> {} 字节：{}", lrc.len(), lrc.lines().next().unwrap_or(""));
+            assert!(lrc.contains("[00:"), "{id} 没拿到 LRC：{lrc}");
+        }
+    }
 }

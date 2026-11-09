@@ -526,9 +526,38 @@ impl PluginManager {
         }
     }
 
+    /// 插件是否声明了某项能力。外部音源曲目改派前先检查，别把歌词请求
+    /// 扔给一个没有 `getLyric` 的插件。
+    fn has_capability(&self, plugin_id: &str, cap: &str) -> bool {
+        self.plugins
+            .read()
+            .get(plugin_id)
+            .map(|p| p.manifest.capabilities.iter().any(|c| c == cap))
+            .unwrap_or(false)
+    }
+
     pub async fn lyric(&self, plugin_id: &str, track: &Track) -> AppResult<String> {
+        // 外部歌单导入的曲目挂在「导入它的插件」名下，pluginTrackId 里却带着真实音源：
+        // QQ 歌单由 netease 插件导入，pluginTrackId = `qq:<songmid>`。若照着
+        // source.pluginId 走，等于拿 QQ 的 mid 去问 /weapi/song/lyric 要歌词，
+        // 必然拿不到。这里改派给认识该前缀的插件，并把前缀剥掉再传。
+        let raw = track
+            .plugin_track_id
+            .clone()
+            .unwrap_or_else(|| track.id.clone());
+        let (target, view) = match external_source_id(plugin_id, &raw) {
+            Some((candidate, bare_id))
+                if self.is_enabled(&candidate) && self.has_capability(&candidate, "lyric") =>
+            {
+                let mut t = track.clone();
+                t.plugin_track_id = Some(bare_id);
+                (candidate, t)
+            }
+            // 目标插件被禁用 / 不提供歌词时保持原行为，不打扰正常曲目
+            _ => (plugin_id.to_string(), track.clone()),
+        };
         let value = self
-            .call(plugin_id, "getLyric", vec![track_to_json(track)])
+            .call(&target, "getLyric", vec![track_to_json(&view)])
             .await?;
         Ok(value.as_str().unwrap_or_default().to_string())
     }
@@ -714,6 +743,19 @@ fn remote_to_track(plugin_id: &str, r: RemoteTrack) -> Track {
     }
 }
 
+/// 解析外部音源曲目 ID：`[宿主插件:]<音源插件>:<原始 id>`。
+/// 只有前缀指向另一个插件时才需要改派；同插件前缀、网易云的纯数字 id
+/// 都返回 `None`。`split_once` 保留原始 id 里可能存在的冒号。
+fn external_source_id(plugin_id: &str, raw: &str) -> Option<(String, String)> {
+    let own_prefix = format!("{plugin_id}:");
+    let bare = raw.strip_prefix(&own_prefix).unwrap_or(raw);
+    let (candidate, rest) = bare.split_once(':')?;
+    if candidate.is_empty() || rest.is_empty() || candidate == plugin_id {
+        return None;
+    }
+    Some((candidate.to_string(), rest.to_string()))
+}
+
 fn track_to_json(t: &Track) -> serde_json::Value {
     serde_json::json!({
         "id": t.plugin_track_id.clone().unwrap_or_else(|| t.id.clone()),
@@ -746,7 +788,7 @@ fn version_gt(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::version_gt;
+    use super::{external_source_id, version_gt};
 
     #[test]
     fn version_compare() {
@@ -758,5 +800,28 @@ mod tests {
         assert!(!version_gt("1.0.0", "2.0.0"));
         // 磁盘上是坏版本号时按 0 处理 → 内置覆盖
         assert!(version_gt("1.0.0", ""));
+    }
+
+    #[test]
+    fn external_source_id_routes_qq_playlist_tracks() {
+        // QQ 歌单由 netease 插件导入：真实音源是 qq，原始 id 要剥掉前缀
+        assert_eq!(
+            external_source_id("netease", "qq:0039MnYb0qxYhV"),
+            Some(("qq".into(), "0039MnYb0qxYhV".into()))
+        );
+        // 老存档缺 pluginTrackId 时回退的是完整的 Track.id
+        assert_eq!(
+            external_source_id("netease", "netease:qq:0039MnYb0qxYhV"),
+            Some(("qq".into(), "0039MnYb0qxYhV".into()))
+        );
+    }
+
+    #[test]
+    fn external_source_id_keeps_native_tracks() {
+        assert_eq!(external_source_id("netease", "123456"), None);
+        assert_eq!(external_source_id("netease", "netease:123456"), None);
+        assert_eq!(external_source_id("qq", "0039MnYb0qxYhV"), None);
+        assert_eq!(external_source_id("qq", "qq:0039MnYb0qxYhV"), None);
+        assert_eq!(external_source_id("netease", "qq:"), None);
     }
 }

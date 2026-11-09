@@ -1218,12 +1218,14 @@ var QQ_DISS_API =
 /** 专辑封面 CDN。歌单曲目只有 albummid，没有现成图片地址；
  *  用 songmid 拼会 404（2026-11-09 实测），必须用专辑 mid。
  *  y.gtimg.cn 不需要 Referer，直出 JPEG；1292 首样本 albummid 覆盖率 100%。
- *  与独立 qq 插件的 coverUrl 保持一致，改域名时两处都要动。 */
+ *  300×300 在播放页 / 高 DPI 屏上会糊，改取 800×800（12/12 抽样实测均为
+ *  真 800×800；1000 会 404、1500 单张约 550 KB 过重）。
+ *  与独立 qq 插件的 coverUrl 保持一致，改域名 / 尺寸时两处都要动。 */
 function qqCoverUrl(song) {
   var mid = song.albummid ||
     (song.album && (song.album.mid || song.album.pmid)) || '';
   if (!mid) return '';
-  return 'https://y.gtimg.cn/music/photo_new/T002R300x300M000' + mid + '.jpg';
+  return 'https://y.gtimg.cn/music/photo_new/T002R800x800M000' + mid + '.jpg';
 }
 
 function qqPlaylist(disstid) {

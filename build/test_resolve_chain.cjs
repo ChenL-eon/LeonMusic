@@ -542,7 +542,7 @@ ok(gdCalls === gdBefore,
   ok(pl && pl.tracks[1].artist === '大嘴巴 / 嘉宾',
     '多歌手用「 / 」拼接，与网易云的展示一致');
   ok(pl && pl.tracks[0].coverUrl ===
-    'https://y.gtimg.cn/music/photo_new/T002R300x300M000002JHJdH2LqxOi.jpg',
+    'https://y.gtimg.cn/music/photo_new/T002R800x800M000002JHJdH2LqxOi.jpg',
     '曲目封面按 albummid 拼 CDN 地址，不是留空');
   ok(pl && pl.tracks[1].coverUrl.indexOf('003TdIgo0sPm0U') > 0 &&
     pl.tracks[1].coverUrl !== pl.tracks[0].coverUrl,
