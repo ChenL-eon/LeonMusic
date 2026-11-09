@@ -57,11 +57,19 @@
   }
 }
 
-/* 播放页沉浸背景（深色专辑图）时，TitleBar 的浅色底衬会形成一条
-   浅色带 —— 属性由 NowPlaying 的 immersive watch 同步到根元素。
-   :root 前缀提高特异性，压过 scoped 组件样式的 .titlebar[data-v]。 */
-:root[data-immersive] .titlebar {
-  background: transparent;
+/* 标题栏本身不带任何底色（见 TitleBar.vue）：它一旦有底衬，就会把 body
+   顶部那片 --bg-grad 径向光晕盖成一条纯色带 —— 浅色下白带、深色下黑带。
+   代价是开背景图时窗口控制按钮会直接压在照片上，而照片明暗不可控：
+   深灰图标落在暗部（浅色主题 + 深色照片）几乎看不见，浅色图标落在亮部
+   （深色主题 + 浅色照片）同样消失，靠给图标加描边只能救一半。
+   所以给按钮组一小块自带的玻璃底，图标继续用主题色，不必为照片颜色妥协。
+   只有 138×38，且贴着窗口右上角，不会形成横贯窗口的色带。 */
+html[data-custom-bg] .titlebar .controls {
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  border-radius: 0 0 0 12px;
+  /* 按钮 hover 的底色是方块，不裁一下会从左下圆角探出去 */
+  overflow: hidden;
 }
 
 html[data-theme="dark"] {
@@ -141,13 +149,76 @@ body {
   opacity: var(--bg-image-opacity, 0.35);
 }
 
-/* 开了背景图时，几块近不透明的底衬再让出一点通透度 */
-html[data-custom-bg] .m-sub {
-  background-color: color-mix(in srgb, var(--bg) 84%, transparent);
+/* ==========================================================================
+   自定义背景 → 玻璃材质
+   --------------------------------------------------------------------------
+   只放背景图不够：桌面端原本只有 .card 有实底，其余容器全透明，文字直接
+   压在照片上（可读性差），而 .card 又是纯白实心（和背景完全割裂）。
+   这里把「面积最大的那几块表面」统一换成半透明玻璃，小控件（输入框、
+   下拉、滑块）继续用实色 --panel —— 它们跟着半透明会丢描边、看不清。
+
+   两层 alpha 是刻意的：.card 叠在 .main/.sidebar 之上，两个半透明会
+   相乘，0.56 的面板 + 0.34 的卡片 ≈ 0.71，既比面板亮一档，又还能透光。
+   ========================================================================== */
+html[data-custom-bg] {
+  --glass-panel: color-mix(in srgb, var(--panel) 66%, transparent);
+  --glass-card: color-mix(in srgb, var(--panel) 36%, transparent);
+  /* 模糊半径不能太大：36px 会把背景糊成一块均匀的色，看着像蒙了层白纱。
+     16px 留下背景的大块明暗（树影、光斑），玻璃才有「透过一层」的质感。
+     saturate 让透过来的照片不掉色，单纯 blur 会发灰。 */
+  --glass-blur: blur(16px) saturate(150%);
+  /* 玻璃上沿的一道高光，模拟厚度；没有它面板就是一个纯色矩形 */
+  --glass-edge: inset 0 1px 0 color-mix(in srgb, var(--panel) 75%, transparent);
 }
-html[data-custom-bg] .titlebar,
-html[data-custom-bg] .player-bar {
-  backdrop-filter: blur(16px);
+
+/* 桌面端：侧栏 / 主区 / 播放条各自成一块玻璃，中间留手缝让背景透出来。
+   移动端是另一套做法（元素级玻璃 + 背景图自身模糊），全部在 mobile.css
+   末节 —— 窄屏上照着桌面切面板只会切出碎片。 */
+@media (min-width: 861px) {
+  html[data-custom-bg] .shell {
+    column-gap: 10px;
+    row-gap: 8px;
+    /* 安全区可能是 0（桌面无手势条），max() 保证四周始终留出 10px */
+    padding-left: max(var(--sal), 10px);
+    padding-right: max(var(--sar), 10px);
+    padding-bottom: max(var(--sab), 10px);
+  }
+  html[data-custom-bg] .sidebar,
+  html[data-custom-bg] .main {
+    background: var(--glass-panel);
+    backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-l);
+    box-shadow: var(--glass-edge);
+  }
+  /* 玻璃从标题栏下沿开始，别顶到窗口圆角上：原来的 padding-top 里含
+     --titlebar-h，改成 margin + 固定内边距，视觉高度不变。 */
+  html[data-custom-bg] .sidebar {
+    margin-top: calc(var(--titlebar-h) + 8px);
+    padding-top: 14px;
+  }
+  html[data-custom-bg] .main {
+    margin-top: calc(var(--titlebar-h) + 8px);
+    padding-top: 14px;
+  }
+
+  /* 卡片：面板之上再亮一档 */
+  html[data-custom-bg] .card {
+    background: var(--glass-card);
+  }
+
+  /* 播放条：和面板同一档玻璃，别比面板更实（原来是 88% 的近实心） */
+  html[data-custom-bg] .bar {
+    background: var(--glass-panel);
+    backdrop-filter: var(--glass-blur);
+    box-shadow: var(--glass-edge);
+  }
+
+  /* 三块玻璃左边缘要对齐：.player-bar 原来左右各留 22px，比侧栏/主区的
+     10px 宽，开背景后会把播放条缩进一截，看起来像没摆正。 */
+  html[data-custom-bg] .player-bar {
+    padding: 0;
+  }
 }
 
 /* 只在触摸设备上禁选：桌面上还要能复制歌名/路径 */

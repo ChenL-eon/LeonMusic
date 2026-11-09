@@ -37,6 +37,20 @@ html[data-theme="dark"] .mobile-shell {
   --m-shadow-float: 0 14px 36px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
+/* 开了自定义背景就让出这层底衬。
+   外壳铺满视口、且是独立层叠上下文（isolation: isolate），它的不透明底色
+   会把 App.vue 的 .app-bg 整块盖住 —— 安卓端「选了图却看不到」的真正原因
+   （桌面没有这层壳，所以桌面正常）。这里让出的颜色与 body 的 canvas 完全
+   一致，没有背景图时视觉零变化。
+
+   不是全透明，留 58%：手机是单列全屏，歌曲行没有卡片承托、正文直接压在
+   照片上，照片一花整页就没法读，这一层是它们的「纸」。比桌面的 .main
+   （66%）再透一档 —— 屏幕小，盖太实就完全看不出开过图。 */
+html[data-custom-bg] .mobile-shell {
+  background-color: color-mix(in srgb, var(--bg) 58%, transparent);
+  background-image: none;
+}
+
 .m-page {
   position: absolute;
   inset: 0;
@@ -211,3 +225,63 @@ html[data-theme="dark"] .mobile-shell {
   opacity: 0;
   transform: translateY(8px);
 }
+
+/* ==========================================================================
+   自定义背景 → 移动端玻璃
+   --------------------------------------------------------------------------
+   main.css 里那套玻璃全在 @media (min-width: 861px) 内，手机上一行都不生效。
+   而移动端不能照抄桌面：桌面是「侧栏 / 主区 / 播放条」三块面板，手机是单列
+   全屏，切块只会切出碎片。所以分两层做：
+
+   1) 底：背景图自己先糊一次。.app-bg 是 position:fixed 的独立层，filter
+      只合成一遍；换成为整页 backdrop-filter 的话，安卓 WebView 每帧都要
+      重算全屏模糊，滚动直接掉到 30fps。这一步是零成本的替代。
+   2) 面：卡片 / 胶囊 / 圆按钮做小面积玻璃。面积小、层级浅，掉帧风险可控。
+
+   alpha 比桌面高一档（面板 66% → 80%）：手机字号小、行距紧，照片的明暗
+   细节比桌面更容易吃掉文字，宁可多盖一点。
+   ========================================================================== */
+html[data-custom-bg] {
+  --m-glass: color-mix(in srgb, var(--panel) 80%, transparent);
+  --m-glass-blur: blur(14px) saturate(140%);
+}
+
+/* 只模糊「有照片时」的移动端。inset 外扩是因为 blur 会把图片边缘一起虚掉，
+   不扩会在四周露一圈底色 —— 比 scale 好，不会改变 cover 的基准尺寸。 */
+@media (max-width: 860px) {
+  html[data-custom-bg] .app-bg {
+    inset: -18px;
+    filter: blur(14px) saturate(115%);
+  }
+  /* 二级页里「其余分类」直接复用桌面 Settings.vue，那里的卡片是 .card。
+     桌面版靠 main.css 的 36% + 面板 66% 叠出层次，移动端没有面板可叠，
+     用同一档 80%，否则一进分类页就从玻璃变回一块块纯白。
+     必须限定在窄屏：这条不带 media 的话会盖掉桌面那份 36%。 */
+  html[data-custom-bg] .card {
+    background: var(--m-glass);
+    backdrop-filter: var(--m-glass-blur);
+    -webkit-backdrop-filter: var(--m-glass-blur);
+  }
+}
+
+/* .m-chip.on / .m-round.primary 是主色实心按钮，被半透明覆盖会直接失去
+   「选中 / 主操作」的语义，所以用 :not() 排除，它们保持原来的实色。 */
+html[data-custom-bg] .m-card,
+html[data-custom-bg] .m-chip:not(.on),
+html[data-custom-bg] .m-round:not(.primary),
+html[data-custom-bg] .ms-card,
+html[data-custom-bg] .fm-card {
+  background: var(--m-glass);
+  backdrop-filter: var(--m-glass-blur);
+  -webkit-backdrop-filter: var(--m-glass-blur);
+}
+
+/* 设置页的搜索胶囊：不给它玻璃的话，浅色主题下它是唯一一块纯白，
+   在一堆半透明卡片里像贴了张纸。比卡片实一档（88%），因为它是输入框，
+   底下要托住光标和占位文字；12% 的透光量不值得再挂一层 backdrop-filter。 */
+html[data-custom-bg] .ms-search {
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+/* 二级页（.m-sub）不在这里处理：它盖在首页之上，透出来的是首页内容而不是
+   照片，所以走「自己铺一层模糊图」，见 MobileShell.vue 的 scoped 样式。 */

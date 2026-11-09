@@ -991,6 +991,29 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 歌词是「按需加载」的资源。推事件意味着每首路过的歌都要解析一遍 LRC；
 现在前端在 `trackId` 变化时主动 `invoke("player_lyrics")`。
 
+**为什么不用 `tauri-plugin-updater`？**
+官方 updater 只认「静态 `latest.json` + 签名」，只跑 NSIS 安装包；而本项目的
+下载渠道是 Gitee / GitHub 的 Release 附件，主推的又是**便携版**（包里只有一个
+exe，没有安装器）。所以自己实现 `commands/update.rs`：`update_download`
+流式落盘并发 `EVT_UPDATE_PROGRESS`；`update_apply` 在 Windows 上从便携包
+解出 exe、校验 PE 头，然后交给一段 PowerShell——它等本进程退出（运行中的 exe
+不能被覆盖，单实例插件又不允许「先启新再退旧」）、覆盖、重新拉起。
+Android 则是下载 APK 后走 FileProvider 交给系统安装器（`LeonBridge.installApk`，
+需 `REQUEST_INSTALL_PACKAGES` 与用户在「安装未知应用」里授权一次）。
+渠道默认国内（Gitee）：`/releases/latest` 不排除预览版，所以国内渠道取列表
+自己挑最新的正式版。
+
+替换本身在一段隐藏的 PowerShell 里完成：等旧进程退出 → 把当前 exe 备份到
+`<缓存>/updates/previous.exe` → 覆盖 → 拉起 → 观察 8 秒。新版一启动就退
+（包损坏 / 架构不对 / 缺运行库）时自动还原备份并重新拉起，用户最差只是
+「这次更新没生效」，不会变成点不开的图标。全过程写在
+`<缓存>/updates/update.log`，排查更新失败先看它。
+
+> 调试提示：用工具（agent 的 shell / IDE 终端）启动应用做更新测试时，工具调用
+> 结束会连带杀掉该调用派生的整棵进程树，看起来就像「更新后新进程活不下来」。
+> 想复刻用户双击的处境，得让进程脱离作业对象（`CREATE_BREAKAWAY_FROM_JOB`，
+> 作业不允许 breakaway 时改用 `explorer.exe <exe>` 或计划任务拉起）。
+
 **为什么 `played_frames` 而不是计时器？**
 设备真实消费的帧数不会因为缓冲区大小、暂停、seek 而漂移。
 `Instant::now()` 差值在 Android 上会随 Doze 变得不可靠。
@@ -998,6 +1021,59 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 **为什么插件每次调用新建 Context？**
 `boa_engine::Context` 是 `!Send`。要跨 `spawn_blocking` 线程复用只能加锁，
 反而更慢。每次新建 Context + 预编译脚本，实测足够快（插件调用本身有网络 IO）。
+
+**为什么自定义背景要做玻璃材质，而不是让内容浮在照片上？**
+第一版只做「背景图 + `.card` 白底」，结果两头不讨好：设置页的导航和行
+直接压在照片上，浅灰副标题几乎读不出来；而 `.card`、播放条又是纯白实心，
+像在照片上贴了张纸，和背景完全割裂。参照同类播放器（酷狗）的做法，
+开背景时把**面积最大的几块表面**（侧栏 / 主区 / 播放条）统一换成
+「半透明 + 背景模糊」的玻璃，卡片在其上再亮一档：
+`--glass-panel` 66% / `--glass-card` 36%，两层 alpha 相乘 ≈ 0.78，
+既压得住文字又还能透光。模糊半径只要 16px —— 一开始用 36px，
+背景被糊成一块均匀的色，看着像蒙了层白纱，反而没有玻璃感。
+小控件（输入框 / 下拉 / 滑块）**不**跟着半透明，否则描边和滑块位置都看不清。
+全部规则挂在 `html[data-custom-bg]` 下、且限定 `min-width: 861px`：
+不开背景图时零改动。
+
+**移动端为什么不能照抄这套分块玻璃？**
+手机是单列全屏，没有「侧栏 / 主区」可切，照着切只会切出碎片，所以换成
+两层做法（`mobile.css` 末节）：
+
+1. **底**：不让整页挂 `backdrop-filter` —— 安卓 WebView 每帧都要重算全屏
+   模糊，滚动会掉到 30fps。改成给 `.app-bg` 自身 `filter: blur(14px)`
+   （它是 `position: fixed` 的独立层，只合成一遍），再让 `.mobile-shell`
+   留 58% 的 `--bg` 蒙层。照片可见度 = 42%，比桌面的 34% 略高：屏幕小，
+   盖太实就完全看不出开过图。
+2. **面**：卡片 / 胶囊 / 圆按钮（`.m-card` / `.m-chip` / `.m-round` /
+   `.ms-card` / `.fm-card`，以及二级页里复用桌面组件时的 `.card`）做
+   小面积玻璃，80% + `blur(14px) saturate(140%)`。主色实心按钮
+   （`.m-chip.on` / `.m-round.primary`）用 `:not()` 排除，否则「选中」和
+   「主操作」的语义会被半透明吃掉。
+
+**为什么二级页（`.m-sub`）不能靠「透明」去透背景图？**
+`.m-sub` 是 `absolute` 盖在一级页之上的整页。第一版把它降到 58% 半透明，
+截图上直接看到首页的「推荐 / 电台」胶囊、私人 FM、每日推荐整片浮在设置页
+后面 —— 透出来的不是照片，是下面那层的歌曲行。所以底色保持不透明，另起
+一层 `::before`（`z-index: -1`，落在底色之上、内容之下）自己铺一张
+`blur(18px)` 的照片，`opacity = 用户透明度 × 0.42`，和首页的可见度对齐
+（0.42 × 0.58 ≈ 首页那层蒙层的透光率）。系数写 0.9 时二级页比首页暗一倍，
+浅色主题下整页发灰。
+
+**标题栏为什么一点底色都不留？**
+最初 `.titlebar` 挂了一条 `linear-gradient(--bg 88% → transparent)`，本意是
+「内容滚动穿过标题带时有个柔和过渡」。但它只含 `--bg` 纯色、不含
+`--bg-grad` 的径向光晕，等于把主界面顶部那片光晕（浅色 `#e6e0ff` /
+深色 `#1d1736`）抹成一条纯色带：浅色下多一条白带、深色下多一条黑带，
+大面积匀色下人眼对 2~7 级的亮度差反而特别敏感（马赫带），一眼就能看出
+窗口顶部「贴了一条」。而内容其实穿不过去 —— `.sidebar` / `.main` 的
+`padding-top` 里都含 `--titlebar-h`，滚动发生在各自容器内部。所以标题栏
+现在就是纯透明，只承担拖拽，视觉上完全不存在。
+
+代价是开背景图时窗口控制按钮直接压在照片上，而照片明暗不可控：深灰图标
+落在暗部（浅色主题 + 深色照片）几乎看不见，浅色图标落在亮部（深色主题 +
+浅色照片）同样消失，加描边只能救一半。于是给 138×38 的按钮组一小块
+**自带的玻璃底**（`--bg` 72% + `blur(10px)` + 左下 12px 圆角），图标继续
+用主题色，不必对用户的照片做任何假设。
 
 ---
 
@@ -1047,6 +1123,9 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | 智能音质 / 移动端设置微调（本次） | `npm run typecheck` + `npm run build` + 无头 Edge 390×844 / 1180×820（假 Tauri 宿主）+ `node build/test_resolve_chain.cjs` + `cargo test --lib` | ✅ 移动端「外观」页不再渲染主色色板（桌面端保留）；歌词字号步进框从「数字挤在左侧、右边一片空白」改为值靠左、箭头贴右并加分隔线，高度 44px（横屏回退紧凑样式）；「播放」页首行新增智能音质开关（默认开启）。后端：`Track.qualityHint` 只在降级重试时出现，`smart_next_level` 逐档下降并在最低档返回 None；`EVT_PLAY_FAILED` → `resolve_and_play` 重解析，解析失败也继续降档；失败终态补写 `PlaybackStatus::Error`（不再永远停在 Buffering）；异步解析前后都校验队列当前项，用户中途切歌时丢弃过期结果，不会被拽回上一首。插件 2.21.0；JS 40 passed / Rust 53 passed |
 | 官方 320k 时仍取 FLAC（本次） | 真实联网 `getStreamUrl` + `node build/test_resolve_chain.cjs` | ✅ 根因：官方 eapi 给「非试听 320k」时旧逻辑直接 return，第三方链从未被问；《水之湄》实测酷我 BD 稳定给 2000k FLAC（连测 6 次 900）。改后 `getStreamUrl` 返回 `source=resolved / format=flac / bitrate=900000 / downgraded=false`；解析只到 320/128 时保留官方链接；官方给 FLAC 时零解析请求。插件 2.20.0，单测 37 passed / 0 failed，Rust 51 passed |
 | 安卓设置分类 + 通知栏/锁屏（本次） | `npm run build` + `cargo check`（Windows / `aarch64-linux-android` 双 target）+ `./gradlew :app:compileUniversalDebugKotlin` + release APK 静态核验 | ✅ 新建 `MobileSettings.vue` 分组卡片首页（4 组 9 项 + 搜索设置），桌面 `Settings.vue` 一行未改；`MobileShell` 让系统返回先消费「详情 → 分类」。修掉四个真实缺陷：① `seek:<ms>` 在 `dispatch_from_kotlin` 无分支，锁屏进度拖完弹回；② 缺 `setMediaButtonReceiver` 与 manifest receiver，蓝牙/线控失效；③ 缺 `setSessionActivity`，锁屏卡片点不开 App；④ **release 包 R8 把 `LeonBridge.query` 等 JNI 按名调用的静态方法裁掉**（dex 里原本找不到 `query` / `notificationGranted` / `sessionActive`）—— `android-overlay/proguard/leon-jni.pro` 显式 keep 后全部回来。新增「通知与锁屏」面板：权限/会话/前台状态、两个开关、跳系统通知设置。产物 `E:\Test\LeonMusic-1.1.1-android-arm64-media.apk` 22,706,791 B，sha256 `f0628bff…8ff56`，720 条目 / `testzip()` OK / EOCD 尾部 0 B / v2 签名 `ebb3bdb8…a3c133`（与 1.1.1 一致，可覆盖安装）/ 仅 arm64 / dist 四个资源名与三个新 command 名全部命中 `.so`。版本号未动（仍 1.1.1 / versionCode 3），未提交未发布 |
+| 更新渠道 + 应用内升级（本次） | `npm run typecheck` + `cargo test --lib update`（8 条）+ `cargo check`（Windows / `aarch64-linux-android`）+ `npx tauri android build --apk --target aarch64` + WebView2 CDP 实测 | ✅ 渠道：设置页「版本更新」新增国内（Gitee，默认）/ 国外（GitHub）分段切换，切完自动复查，`settings_get` 落库为 `cn` / `global`；两条渠道都返回 `✓ 已是最新版本（v1.3.0）`。国内渠道走列表接口自己挑正式版（Gitee 的 `/releases/latest` 不排除预览版）。应用内升级：把接口响应改成 v9.9.9 后卡片出现「发现新版本 v9.9.9 / 立即更新 / 下载页」，点「立即更新」走真实 Gitee 下载 8.6 MB（截图 `2% 256 KB / 8.6 MB` + 进度条 + 取消），随后进程退出，helper 覆盖目标 exe（23,806,464 B 构建 → 23,704,064 B 发布版）并拉起新实例，连续观察 18 秒稳定存活，`update.log` 记 `replace ok=True → spawned pid=… → new instance alive`。回滚路径用「启动即退出」的桩包验证：`new instance gone after 0s (code=0), rolling back`，exe 秒级还原成原构建并重新拉起。注：早期「新进程活不下来」是测试环境假象——工具调用结束会连带杀掉该调用派生的整棵进程树，脱离作业对象后现象消失。Rust 8 条单测：解包单 exe / 跳过非 exe / 拒绝 HTML（非 MZ）/ 拒绝过小包 / 无 exe 包 / UTF-16LE 编码 / 文件名白名单。APK 22,795,179 B，dex 含 `installApk`（R8 keep 生效）、manifest 含 `REQUEST_INSTALL_PACKAGES` 与 `${applicationId}.fileprovider`；安装器链路需真机点一次「允许安装未知应用」，本轮未上真机 |
+| 桌面自定义背景玻璃材质（本次） | Windows release 构建 + WebView2 CDP（`--remote-debugging-port=9223`，`Page.captureScreenshot` 1:1 取图），浅色 / 深色两套主题各截首页 + 设置页；测试图用一张暗色森林照片（与用户实际场景同色系），透明度 100% | ✅ 三块表面（`.sidebar` / `.main` / `.player-bar` > `.bar`）统一成玻璃：`--glass-panel` 66% + `blur(16px) saturate(150%)`，卡片 `--glass-card` 36% 叠在其上；森林的树影与光雾从面板下透出，正文/副标题均可读。深色主题下同一套变量自然变成深色玻璃（`--panel: #121219`），未出现文字对比度不足。三块玻璃左边缘对齐（`.player-bar` 的 22px 内缩在开背景时归零）。**回归验证**：关掉「使用自定义背景」后截图与改动前完全一致（无玻璃块、无多余缝隙、播放条内缩回到 22px）——所有规则都挂在 `html[data-custom-bg]` 下且限定 `min-width: 861px`，移动端材质不变。踩过的坑：blur 36px 会把背景糊成均匀一片，像蒙白纱；降到 16px 才有「透过一层玻璃」的质感 |
+| 安卓自定义背景无效（本次） | 真机 Xiaomi 2410DPN6CC + WebView CDP（`adb forward tcp:9223 localabstract:webview_devtools_remote_<pid>`，触摸用 `Input.dispatchTouchEvent` 注入） | ✅ 根因：移动端外壳 `.mobile-shell` 自带一份不透明底衬（`background: var(--bg)` + `--bg-grad`）、铺满视口且 `isolation: isolate`，把 `App.vue` 的 `.app-bg`（`z-index:-1`）整块盖住；桌面根本没有这层壳，所以只在安卓复现（不是 asset 协议、也不是 IPC 问题：`https://asset.localhost/%2Fdata%2Fuser%2F0%2F…` 直接 fetch 返回 200、8×8 图能 `onload`；`app_set_background_image` 连 8 MB base64 也 98 ms 完成）。修复：`html[data-custom-bg] .mobile-shell { background-color: transparent; background-image: none }` —— 让出的底色与 body 的 canvas 完全一致，未开背景图时视觉零变化。真机验证：同步注入 2000×1500 JPEG 走完整链路（File→base64→IPC→落盘→`data-custom-bg`→`.app-bg`）后，首页与设置列表的背景图完整透出；覆盖安装修复版重启后同样生效 |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
 （普通 / 多时间标签 / 逐字 / 偏移 / 同时间戳译文合并）、文件名解析、
@@ -1141,6 +1220,9 @@ AES-CBC / AES-ECB / RSA-NoPadding 与 Node `crypto` 逐字节对齐、
 | 联网协议回归 | ✅ 建码拿到 unikey、轮询 801、匿名账号 `loggedIn:false` |
 | 2.3.0 会话预热 | ✅ 首页 `getEx` 拿到 `NMTID=...`，建码与轮询全程带同一份会话 Cookie，轮询仍回 801 |
 | 独立「账号」页（Windows 便携版 CDP） | ✅ 侧栏「账号」直达、标题「账号与登录」、渲染 1 张插件卡片、风控说明卡；设置 → 音源插件 只剩「前往账号页」跳转条，cookie 输入框已隐藏 |
+| 桌面自定义背景 → 标题栏（本次） | Windows release 构建 + WebView2 CDP 截图（`Page.captureScreenshot`）+ 逐行像素采样 | ✅ 根因：`TitleBar.vue` 自带一条 `linear-gradient(--bg 88% → transparent)`，本来给纯色界面做「滚动内容穿过标题带」的柔和过渡，压在照片上就成了一条灰雾带（采样：y=0~45 全是 rgb≈240 的灰，照片到 y≈80 才完全露面），把标题栏和下面三块玻璃切成两段。修复 `html[data-custom-bg] .titlebar { background: transparent }`，照片一直铺到窗口顶端。连带问题：整条透明后窗口控制按钮直接压在照片上，浅色主题的深灰图标（`--text-2` `#5c5c70`）在暗照片上几乎消失；先试「白色图标 + `drop-shadow` 描边」，纯白照片下仍偏弱，最终给 `.controls` 一小块自带玻璃底（`--bg` 72% + `blur(10px) saturate(140%)` + 左下 12px 圆角 + `overflow: hidden` 裁掉按钮 hover 的方角），图标继续用主题色，深浅主题自动适配。验证矩阵：深色森林 / 浅灰雪山 / 纯白三张背景 × 浅色 / 深色主题，按钮均清晰、无横贯色带（灰带只在 138×38 的右上角控件区以内）。**回归**：关掉背景后 `.titlebar` 的 computed `background-image` 恢复为原渐变、`.controls` 回到 `rgba(0,0,0,0)` / `none` / `0px`，截图与改动前一致 |
+| 标题栏与主界面完全融合（本次续） | Windows release 构建 + WebView2 CDP，浅色 / 深色 × 开 / 关背景四种组合，逐行像素采样 | ✅ 上一行只修了「开背景」的场景，默认界面（无背景图）的标题栏仍然带那条 `--bg` 88% 渐变：它只含纯色、不含 `--bg-grad` 的径向光晕，等于把主界面顶部的光晕（浅色 `#e6e0ff` / 深色 `#1d1736`）抹成一条纯色带 —— 浅色下白带、深色下黑带，大面积匀色下人眼对 2~7 级亮度差特别敏感（马赫带），一眼就看出窗口顶部「贴了一条」。而内容其实穿不过去（`.sidebar` / `.main` 的 `padding-top` 都含 `--titlebar-h`，滚动在各自容器内部），这条渐变纯属装饰。改成 `background: transparent` 并删掉 `transition` 与 main.css 里两条只为它服务的透明覆盖（`data-immersive` / `data-custom-bg`）。改后采样无跳变：浅色 y=0→80 恒为 `rgb(240,239,249)`，深色 `rgb(14,13,24)` → `rgb(13,12,21)`；左上紫光从窗口顶端自然扩散。开背景场景用 CSS 注入模拟验证（不碰数据库）：`.titlebar` 的 `background-image` 为 `none`，`.controls` 仍是 `color(srgb … / 0.72)` + `blur(10px) saturate(1.4)`，玻璃底未受影响 |
+| 移动端自定义背景玻璃（本次） | Windows release 构建 + CDP `Emulation.setDeviceMetricsOverride`（412×915 @2x，触发 `matchMedia(max-width:860px)` 挂上 MobileShell）+ 截图；背景图与 `data-custom-bg` 用 CSS 注入模拟（`build/cdp_mobile_shot.cjs`），不读不写用户数据库 | ✅ 结论先行：桌面的玻璃全在 `@media (min-width:861px)` 内，手机端此前**一条都没适配**，除了「让壳透明」的修复外，卡片仍是实心 `--panel`。移动端改用两层：`.app-bg` 自身 `blur(14px)`（fixed 层只合成一遍，替代全屏 `backdrop-filter`）+ `.mobile-shell` 58% 蒙层；元素级玻璃（`.m-card` / `.m-chip` / `.m-round` / `.ms-card` / `.fm-card` / 二级页里的 `.card`）80% + `blur(14px) saturate(140%)`，主色按钮用 `:not(.on)` / `:not(.primary)` 排除。**踩到的坑**：`.m-sub` 一度改成 58% 半透明，截图里首页的「推荐 / 电台」胶囊、私人 FM、每日推荐整片从设置页后面透出来（透的是下面那层内容，不是照片）；改为底色保持不透明 + `::before` 自铺 `blur(18px)` 照片（`opacity = 用户透明度 × 0.42`，与首页可见度对齐）。设置页搜索胶囊单独给 88%（否则浅色主题下它是唯一一块纯白，像贴了张纸）。深浅两套主题各截首页 / 设置页 / 分类详情，文字与图标均可读、卡片透出背景光带。**回归**：清掉 `data-custom-bg` 后 `.mobile-shell` 计算样式为 `rgb(244,244,248)` + 原渐变、`.m-card` 为 `rgb(255,255,255)` 且 `backdrop-filter: none`，截图与改动前一致 |
 
 > **没有会员账号，所以没验到 803**：登录成功后写 cookie、会员曲目恢复完整时长
 > 这两步只能靠协议对齐保证——`type=3`、二维码 URL、账号接口路径均与

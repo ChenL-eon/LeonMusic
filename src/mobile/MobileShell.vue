@@ -16,6 +16,7 @@ import MobilePlayer from "@/mobile/MobilePlayer.vue";
 import MobileSearch from "@/mobile/MobileSearch.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
+import { useSettingsStore } from "@/stores/settings";
 import { useUiStore, type Page } from "@/stores/ui";
 import "@/mobile/mobile.css";
 
@@ -27,6 +28,14 @@ type ListKind = "recent" | "cached";
 const ui = useUiStore();
 const library = useLibraryStore();
 const player = usePlayerStore();
+const settings = useSettingsStore();
+
+/** 二级页自己的背景层（见 scoped 里的 .m-sub::before）。
+ *  必须在这里再铺一份：.m-sub 是盖在一级页之上的整页，靠「透明」去透背景
+ *  的话，透出来的是下面那层的歌曲行，不是照片。 */
+const subBgStyle = computed(() =>
+  settings.bgUrl ? { "--m-sub-img": `url("${settings.bgUrl}")` } : {},
+);
 
 const TABS: MobileTab[] = ["home", "search", "favorites", "me"];
 const SUB_PAGES: Page[] = ["library", "playlist", "account", "settings"];
@@ -247,7 +256,7 @@ function navigate(tab: MobileTab, record = true) {
 
       <!-- 二级页：本地音乐 / 歌单 / 账号 / 设置 / 最近 / 已缓存 -->
       <transition name="m-slide">
-        <div v-if="isSub" class="m-sub">
+        <div v-if="isSub" class="m-sub" :style="subBgStyle">
           <!-- 分组设置页自带头部（返回 + 标题 + 搜索），这里不再重复一层 -->
           <div v-if="ui.page !== 'settings'" class="m-sub-head">
             <button class="m-icon" aria-label="返回" @click="back">
@@ -320,6 +329,28 @@ function navigate(tab: MobileTab, record = true) {
   z-index: 30;
   background: var(--bg);
   background-image: var(--bg-grad);
+}
+/* 开背景图时二级页自己铺一份模糊底。
+   不能像一级页那样把底衬让成半透明：.m-sub 是 absolute 盖在首页之上的，
+   一旦透，透出来的是下面那层的歌曲行（实测「推荐 / 电台」胶囊和每日推荐
+   整片浮在设置页后面），不是照片。所以底色保持不透明，另起一层负 z-index
+   的模糊图 —— 它落在 .m-sub 的底色之上、内容之下，遮挡关系不变。
+   inset 外扩是给 blur 留余量，否则四周会露一圈底色。 */
+html[data-custom-bg] .m-sub::before {
+  content: "";
+  position: absolute;
+  inset: -20px;
+  z-index: -1;
+  background-image: var(--m-sub-img, none);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  filter: blur(18px) saturate(115%);
+  /* 0.42 不是随手写的：首页的照片可见度 = 0.42（58% 蒙层）× 用户透明度，
+     这里没有蒙层，只能靠 opacity 直接对齐同一档 —— 换成 0.9 时二级页比
+     首页暗一倍，浅色主题下整页发灰。 */
+  opacity: calc(var(--bg-image-opacity, 0.35) * 0.42);
+  pointer-events: none;
 }
 .m-sub-head b {
   font-size: 16px;

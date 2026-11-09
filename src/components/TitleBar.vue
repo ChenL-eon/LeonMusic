@@ -1,7 +1,10 @@
 <script setup lang="ts">
 /** 无框窗口的自绘标题栏（2026-11-07：与主页面融合，无系统分割线）。
  *  - 整条是拖拽区（data-tauri-drag-region，双击最大化由 Tauri 注入脚本处理）；
- *  - 背景全透明，右侧三个窗口控制按钮，hover 才出现底色；
+ *  - 完全透明，与主界面连成一片：标题栏一旦自带底衬，就会把主界面顶部的
+ *    --bg-grad 径向光晕盖成一条纯色带（浅色下白带、深色下黑带）；
+ *    右侧三个窗口控制按钮，hover 才出现底色；开自定义背景图时按钮组会
+ *    自带一小块玻璃底（规则在 main.css），否则图标压在照片上看不清；
  *  - fixed 悬浮在所有页面（含播放页覆盖层 z35、队列抽屉 z40）之上。
  *
  * 2026-11-09：根节点改 pointer-events:none，事件只由 .dragbar / .controls 接；
@@ -85,18 +88,15 @@ function close() {
   /* 根节点不接事件：样式照画，鼠标交给 .dragbar（拖拽）与 .controls（按钮），
      这样播放页可以在标题带左上角挖一个洞把「收起」按钮露出来。 */
   pointer-events: none;
-  /* 柔和的背景延伸：无分割线，只是把页面渐变顶部略略压实，
-     列表滚动时内容穿过标题带不至于生硬。
+  /* 不画任何底色 —— 标题栏要像「没有标题栏」一样和主界面连成一片。
+     这里原先是一条 --bg 88% → transparent 的渐变，本意是给纯色界面做
+     「内容穿过标题带」的柔和过渡；但它只含 --bg 纯色、不含 --bg-grad 的
+     径向光晕，等于把主界面顶部那片光晕盖掉了：浅色下多一条白带、深色下
+     多一条黑带。而内容其实穿不过去（.sidebar / .main 的 padding-top 里
+     都含 --titlebar-h），所以它只需要是透明的。
      鼠标事件由下面的 .dragbar 单独承接（Tauri 的 drag-region 注入脚本
      靠 mousedown 命中 data-tauri-drag-region 才启动拖拽）。 */
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--bg) 88%, transparent),
-    transparent
-  );
-  /* 播放页沉浸背景（深色专辑图）下底衬会形成浅色带 → 完全透明。
-     规则本体在 main.css（scoped 的 :global 组合编译器不支持）。 */
-  transition: background 0.25s ease;
+  background: transparent;
 }
 
 /* 真正的拖拽命中层：整条标题带 */
