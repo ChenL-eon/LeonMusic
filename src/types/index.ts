@@ -303,6 +303,8 @@ export interface Settings {
   bgOpacity: number;
   cacheLimitMb: number;
   crossfadeMs: number;
+  /** 更新渠道：cn = 国内（Gitee，默认），global = 国外（GitHub） */
+  updateChannel: "cn" | "global";
 }
 
 export interface PlatformInfo {

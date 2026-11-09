@@ -235,6 +235,10 @@ pub fn run() {
             // app
             commands::open_external,
             commands::get_app_version,
+            // 应用内更新（下载 → 安装）
+            commands::update_download,
+            commands::update_apply,
+            commands::update_cancel,
             // player
             commands::player_snapshot,
             commands::player_queue,

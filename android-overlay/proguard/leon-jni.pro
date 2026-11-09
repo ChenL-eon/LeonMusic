@@ -7,6 +7,7 @@
     public static void attach(android.content.Context);
     public static void dispatch(java.lang.String, java.lang.String);
     public static java.lang.String query(java.lang.String);
+    public static java.lang.String installApk(java.lang.String);
     public static native void nativeCommand(java.lang.String);
     public static native java.lang.String nativeSnapshot();
 }

@@ -742,6 +742,10 @@ pub struct Settings {
     pub bg_opacity: f32,
     pub cache_limit_mb: u64,
     pub crossfade_ms: u32,
+    /// 更新渠道：`cn` = 国内（Gitee，默认），`global` = 国外（GitHub）。
+    ///
+    /// 只影响「检测更新」走哪个接口、下载走哪个地址；两边的安装包内容一致。
+    pub update_channel: String,
 }
 
 impl Default for Settings {
@@ -779,6 +783,7 @@ impl Default for Settings {
             bg_opacity: 35.0,
             cache_limit_mb: 2048,
             crossfade_ms: 0,
+            update_channel: "cn".into(),
         }
     }
 }

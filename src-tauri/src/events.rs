@@ -35,6 +35,8 @@ pub const EVT_PLAY_FAILED: &str = "leon://player/play-failed";
 /// 主窗口与桌面歌词窗各自持有独立的 Pinia 实例，任何一窗改设置
 /// （包括歌词窗工具条上的字号/锁定/置顶），另一窗靠这条事件实时跟随。
 pub const EVT_SETTINGS_CHANGED: &str = "leon://settings/changed";
+/// 应用内更新的下载进度 `{ downloaded, total }`（字节；total=0 表示服务端没给长度）。
+pub const EVT_UPDATE_PROGRESS: &str = "leon://update/progress";
 
 // 注：歌词不走事件推送。前端在 trackId 变化时主动 invoke `player_lyrics`，
 // 因为歌词是「按需加载」的资源，推事件会白白解析每一首路过但不看的歌。

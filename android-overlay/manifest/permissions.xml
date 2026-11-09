@@ -21,3 +21,8 @@
 
 <!-- 电池优化白名单引导：必须由用户主动点击，不能静默申请 -->
 <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+<!-- 应用内更新：安装自己下载的 APK。
+     Android 8 起还需要用户在「安装未知应用」里为本站开一次，属于运行时授权，
+     代码里会检测并引导（LeonBridge.installApk）。 -->
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

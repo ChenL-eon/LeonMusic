@@ -10,6 +10,7 @@ mod player;
 mod playlist;
 mod plugin;
 mod settings;
+mod update;
 
 pub use app::*;
 pub use library::*;
@@ -18,3 +19,4 @@ pub use player::*;
 pub use playlist::*;
 pub use plugin::*;
 pub use settings::*;
+pub use update::*;

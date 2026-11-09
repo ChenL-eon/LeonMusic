@@ -38,7 +38,14 @@ SRC_MAIN = ROOT / "app" / "src" / "main"
 DEFAULT_PROJECT = ROOT.parent / "src-tauri" / "gen" / "android"
 
 MEDIA_DEP = 'implementation("androidx.media:media:1.7.0")'
+CORE_DEP = 'implementation("androidx.core:core:1.13.1")'
 MARKER = "android-overlay"
+
+# (依赖, 判重标记, 注释里的用途)
+GRADLE_DEPS = [
+    (MEDIA_DEP, "androidx.media:media", "MediaSessionCompat + MediaStyle 通知"),
+    (CORE_DEP, "androidx.core:core", "FileProvider（应用内更新安装 APK）"),
+]
 
 
 def log(msg: str) -> None:
@@ -222,20 +229,27 @@ def patch_gradle(project: Path, dry: bool) -> bool:
         return False
 
     text = path.read_text(encoding="utf-8")
-    if "androidx.media:media" in text:
-        return False
 
     m = re.search(r"dependencies\s*\{", text)
     if not m:
-        log(f"!! {candidate} 里没有 dependencies 块，请手工加 {MEDIA_DEP}")
+        log(f"!! {candidate} 里没有 dependencies 块，请手工加 {MEDIA_DEP} / {CORE_DEP}")
         return False
 
-    snippet = (
-        f"\n    // MediaSessionCompat + MediaStyle 通知（由 {MARKER} 注入）"
-        f"\n    {MEDIA_DEP}"
-    )
+    # 逐条判断：老工程已经注入过 media，补上新增的 core 即可
+    snippet = ""
+    added = []
+    for dep, marker, why in GRADLE_DEPS:
+        if marker in text:
+            continue
+        snippet += f"\n    // {why}（由 {MARKER} 注入）\n    {dep}"
+        added.append(dep)
+
+    if not snippet:
+        return False
+
     text = text[: m.end()] + snippet + text[m.end():]
-    log(f"+ {candidate}: {MEDIA_DEP}")
+    for dep in added:
+        log(f"+ {candidate}: {dep}")
     if not dry:
         path.write_text(text, encoding="utf-8")
     return True

@@ -3,9 +3,12 @@ package com.leonmusic.player
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import androidx.core.content.FileProvider
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Rust(JNI) ↔ Kotlin 的唯一通道。
@@ -268,6 +271,58 @@ class LeonBridge private constructor() {
                 .put("notificationControl", prefs.getBoolean(KEY_NOTIFICATION, true))
                 .put("lockscreenControl", prefs.getBoolean(KEY_LOCKSCREEN, true))
                 .toString()
+        }
+
+        /**
+         * 把下载好的 APK 交给系统安装器（应用内更新）。
+         *
+         * `bridge.rs::install_apk_inner` 调的就是这个静态方法，签名必须是
+         * `(Ljava/lang/String;)Ljava/lang/String;`。
+         *
+         * 返回空串 = 已拉起安装器；非空 = 给用户看的原因
+         * （最常见的是还没授予「安装未知应用」）。**不抛异常**：调用方在
+         * Rust 里，异常跨 JNI 传回去只会变成一句看不出原因的失败。
+         *
+         * 为什么必须走 FileProvider：下载目录是应用私有缓存，安装器是另一个
+         * 进程，Android 7 起直接用 `file://` 会抛 FileUriExposedException。
+         */
+        @JvmStatic
+        fun installApk(path: String): String {
+            val ctx = appContext ?: return "应用还没有完全启动，请稍后重试"
+            val file = File(path)
+            if (!file.isFile) return "安装包不存在，请重新下载"
+
+            // Android 8 起「安装未知应用」是按应用授权的：没授权直接拉起安装器
+            // 会被系统静默拦掉，用户只会看到「什么都没发生」。
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !ctx.packageManager.canRequestPackageInstalls()
+            ) {
+                try {
+                    ctx.startActivity(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(Uri.parse("package:${ctx.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "open unknown-sources settings failed: ${t.message}")
+                }
+                return "请先允许「LeonMusic 安装应用」，返回后再点一次「立即更新」"
+            }
+
+            return try {
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK,
+                    )
+                }
+                ctx.startActivity(intent)
+                ""
+            } catch (t: Throwable) {
+                Log.e(TAG, "install apk failed: ${t.message}")
+                "无法打开系统安装器：${t.message ?: "未知错误"}"
+            }
         }
 
         /**

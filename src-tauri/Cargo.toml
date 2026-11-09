@@ -1,6 +1,6 @@
 [package]
 name = "leonmusic"
-version = "1.3.0"
+version = "1.4.0"
 description = "LeonMusic - Rust-core music player (Tauri v2)"
 authors = ["Leon"]
 edition = "2021"
@@ -58,6 +58,12 @@ reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
 ] }
 futures-util = "0.3"
+
+# 应用内更新：Windows 上从便携包里取出 exe（只解压，不压缩）。
+# zip 的 deflate 特性同时会拉进 zopfli（写压缩用），但本 crate 的
+# features 数组里不能写 `flate2/rust_backend` 这种跨 crate 特性，
+# 就按官方推荐开 deflate；我们从不构造 writer，LTO 会把没用到的压缩器丢掉。
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 # ---------- plugin sandbox ----------
 boa_engine = "0.22"

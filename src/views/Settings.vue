@@ -1,17 +1,21 @@
 <script setup lang="ts">
 /** 设置：外观 / 桌面歌词 / 播放 / 音源插件 / 流媒体 / 关于。 */
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import BrandLogo from "@/components/BrandLogo.vue";
 import Icon from "@/components/Icon.vue";
 import {
+  EVT,
   app as appApi,
   errorText,
+  on,
   player as playerApi,
   plugins as pluginApi,
   settings as settingsApi,
 } from "@/api/ipc";
 import type { AudioDiag, PluginInfo } from "@/types";
+import type { UpdateProgress } from "@/api/ipc";
 import { STREAM_PLUGIN_IDS, useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 
@@ -562,26 +566,87 @@ function installPlugin() {
 }
 
 // ---------------------------------------------------------------------------
-// 更新检测：GitHub Releases。仓库尚未建/未发版时给出友好提示，
-// 发布首个 Release 后这里自动开始工作。
+// 更新检测与升级
+//
+// 两条渠道：国内走 Gitee、国外走 GitHub。发行版对象的字段一致
+// （tag_name / body / assets），差别只在接口形态：GitHub 有 /latest，
+// Gitee 只能拿列表自己挑最新的正式版（见 pickRelease）。
+//
+// 应用内升级不跳浏览器：
+//   Windows —— 下载便携包里的 exe，退出后由外部小进程替换并重启；
+//   Android —— 下载 APK，交给系统安装器。
+// 平台 / 架构不匹配时（例如以后出别的构建）只保留「下载页」入口。
 // ---------------------------------------------------------------------------
 
-const RELEASE_API = "https://api.github.com/repos/ChenL-eon/LeonMusic/releases/latest";
-const RELEASE_PAGE = "https://github.com/ChenL-eon/LeonMusic/releases";
+interface ReleaseAsset {
+  name: string;
+  url: string;
+}
+
+interface ReleaseInfo {
+  tag: string;
+  notes: string;
+  /** 发行版网页地址：应用内升级不可用时作为兜底 */
+  page: string;
+  /** 当前平台能用的安装包；为 null 时只能去下载页 */
+  asset: ReleaseAsset | null;
+}
+
+const CHANNELS = {
+  cn: {
+    name: "国内",
+    host: "Gitee",
+    api: "https://gitee.com/api/v5/repos/byging/leon-music-releases/releases?per_page=20",
+    page: "https://gitee.com/byging/leon-music-releases/releases",
+    // Gitee 的 /releases/latest 不排除预览版，用列表接口自己挑正式版
+    list: true,
+  },
+  global: {
+    name: "国外",
+    host: "GitHub",
+    api: "https://api.github.com/repos/ChenL-eon/LeonMusic/releases/latest",
+    page: "https://github.com/ChenL-eon/LeonMusic/releases",
+    list: false,
+  },
+} as const;
+
+type Channel = keyof typeof CHANNELS;
+const channelList = (Object.keys(CHANNELS) as Channel[]).map((id) => ({ id, ...CHANNELS[id] }));
+
+const channel = computed<Channel>(() => (s.value.updateChannel === "global" ? "global" : "cn"));
+const channelInfo = computed(() => CHANNELS[channel.value]);
+const platformKind = computed(() => store.platform?.kind ?? "other");
 
 const appVersion = ref("");
-type UpdState = "idle" | "checking" | "latest" | "available" | "error";
+type UpdState = "idle" | "checking" | "latest" | "available" | "downloading" | "installing" | "error";
 const updState = ref<UpdState>("idle");
 const updError = ref("");
-const latestRelease = ref<{ tag: string; notes: string; url: string } | null>(null);
+/** 不致命的提示（例如安卓还没授予「安装未知应用」） */
+const updHint = ref("");
+const latest = ref<ReleaseInfo | null>(null);
+const got = ref(0);
+const total = ref(0);
 
-onMounted(async () => {
-  try {
-    appVersion.value = await appApi.getVersion();
-  } catch {
-    /* 非 Tauri 环境（纯浏览器开发）保持空 */
-  }
+const updBusy = computed(
+  () => updState.value === "checking" || updState.value === "downloading" || updState.value === "installing",
+);
+
+/** 有匹配的安装包 + 当前平台支持替换式安装，才给「立即更新」 */
+const canInApp = computed(() => !!latest.value?.asset && platformKind.value !== "other");
+
+const pct = computed(() => (total.value > 0 ? Math.min(100, Math.floor((got.value / total.value) * 100)) : 0));
+
+const sizeText = computed(() => {
+  if (!got.value) return "";
+  if (!total.value) return `已下载 ${fmtBytes(got.value)}`;
+  return `${fmtBytes(got.value)} / ${fmtBytes(total.value)}`;
 });
+
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
 
 /** 三段数字版本比较（v 前缀容忍）；返回 <0 / 0 / >0。非法段按 0。 */
 function cmpVersion(a: string, b: string): number {
@@ -604,57 +669,200 @@ function cleanNotes(body: string): string {
     .slice(0, 800);
 }
 
+/** 从发行版附件里挑当前平台要的那一个。
+ *
+ *  Windows 用便携包 zip（解出 exe 直接替换，不写注册表、不需要管理员）；
+ *  Android 用 arm64 APK。Gitee 还会把源码 zip 一起放进 assets，
+ *  所以必须按文件名后缀精确匹配，不能取第一个。 */
+function pickAsset(assets: unknown, kind: string): ReleaseAsset | null {
+  const list = Array.isArray(assets) ? assets : [];
+  const match = (re: RegExp): ReleaseAsset | null => {
+    for (const raw of list) {
+      const a = raw as { name?: unknown; browser_download_url?: unknown };
+      const name = typeof a?.name === "string" ? a.name : "";
+      const url = typeof a?.browser_download_url === "string" ? a.browser_download_url : "";
+      if (url && re.test(name)) return { name, url };
+    }
+    return null;
+  };
+  if (kind === "android") return match(/android.*\.apk$/i);
+  if (kind === "windows") return match(/windows.*-portable\.zip$/i);
+  return null;
+}
+
+/** 把两种接口的响应归一成一个发行版对象。
+ *
+ *  GitHub：`/releases/latest` 直接给对象，且已排除草稿与预览版；
+ *  Gitee：只有列表接口可用，顺序不保证、也不排除预览版 —— 这里按创建时间
+ *  倒序挑最新的**正式版**，避免把 v1.4.0-beta 推给所有稳定版用户。
+ *
+ *  两家对「还没有发行版」的形态也不一样（404 / 200+null / 空数组），
+ *  所以调用方不能只看 `resp.ok`。 */
+function pickRelease(payload: unknown, list: boolean): Record<string, unknown> | null {
+  const isObj = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
+  if (!list) return isObj(payload) ? payload : null;
+
+  const ts = (v: unknown) => {
+    const n = Date.parse(String(v ?? ""));
+    return Number.isFinite(n) ? n : 0;
+  };
+  const stable = (Array.isArray(payload) ? payload : [])
+    .filter(isObj)
+    .filter((r) => !r.prerelease && typeof r.tag_name === "string")
+    .sort((a, b) => ts(b.created_at) - ts(a.created_at));
+  return stable[0] ?? null;
+}
+
+/** 每次检测递增：切渠道时上一个请求可能还在路上，
+ *  回来晚了就丢掉——否则「国外」的结果会覆盖刚切到的「国内」。 */
+let checkSeq = 0;
+
+async function setChannel(c: Channel) {
+  if (c === channel.value || updState.value === "downloading" || updState.value === "installing") return;
+  await store.save({ updateChannel: c });
+  checkSeq++;
+  latest.value = null;
+  updError.value = "";
+  updHint.value = "";
+  updState.value = "idle";
+  // 切完立刻查一次：用户点渠道就是为了看有没有更新
+  void checkUpdate();
+}
+
 async function checkUpdate() {
-  if (updState.value === "checking") return;
+  if (updBusy.value) return;
+  const ch = channelInfo.value;
+  const seq = ++checkSeq;
   updState.value = "checking";
   updError.value = "";
+  updHint.value = "";
+  latest.value = null;
+
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 15000);
-    const resp = await fetch(RELEASE_API, {
-      signal: ctrl.signal,
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    clearTimeout(timer);
-    if (resp.status === 404) {
-      updState.value = "error";
-      updError.value = "仓库还没有发布过版本，可稍后再试";
-      return;
+    let resp: Response;
+    try {
+      resp = await fetch(ch.api, {
+        signal: ctrl.signal,
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      });
+    } finally {
+      clearTimeout(timer);
     }
-    if (resp.status === 403) {
-      updState.value = "error";
-      updError.value = "GitHub 接口限流，请稍后再试";
-      return;
-    }
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
-    const tag = String(data.tag_name ?? "").trim();
-    if (!tag) throw new Error("响应里没有版本号");
-    if (cmpVersion(tag, appVersion.value || "0.0.0") > 0) {
-      latestRelease.value = {
-        tag,
-        notes: typeof data.body === "string" ? cleanNotes(data.body) : "",
-        url: String(data.html_url || RELEASE_PAGE),
-      };
-      updState.value = "available";
-    } else {
+    if (seq !== checkSeq) return;
+
+    if (resp.status === 404) throw new Error(`该渠道还没有发布过版本，可稍后再试`);
+    if (resp.status === 403) throw new Error(`${ch.host} 接口限流，请稍后再试`);
+    if (!resp.ok) throw new Error(`接口返回 HTTP ${resp.status}`);
+
+    const payload = (await resp.json()) as unknown;
+    if (seq !== checkSeq) return;
+    const data = pickRelease(payload, ch.list);
+    if (!data) throw new Error("该渠道还没有发布过正式版本，可稍后再试");
+
+    const tag = typeof data.tag_name === "string" ? data.tag_name.trim() : "";
+    if (!tag) throw new Error("接口响应里没有版本号");
+
+    if (cmpVersion(tag, appVersion.value || "0.0.0") <= 0) {
       updState.value = "latest";
+      return;
     }
+
+    const notes = typeof data.body === "string" ? data.body : "";
+    const page = typeof data.html_url === "string" ? data.html_url : ch.page;
+    latest.value = {
+      tag,
+      notes: cleanNotes(notes),
+      page,
+      asset: pickAsset(data.assets, platformKind.value),
+    };
+    updState.value = "available";
   } catch (e) {
+    if (seq !== checkSeq) return;
     updState.value = "error";
-    updError.value =
-      e instanceof Error && e.name === "AbortError"
-        ? "网络超时，请检查网络或代理后重试"
-        : `检测失败：${String(e).slice(0, 80)}`;
+    if (e instanceof Error && e.name === "AbortError") {
+      updError.value = `${ch.host} 连接超时，请检查网络后重试`;
+    } else if (e instanceof Error && /^[\x20-\x7e]+$/.test(e.message)) {
+      // fetch 自己抛的英文错误（Failed to fetch 等）补一层上下文
+      updError.value = `检测失败：${e.message.slice(0, 80)}`;
+    } else if (e instanceof Error && e.message) {
+      updError.value = e.message;
+    } else {
+      updError.value = "检测失败，请稍后重试";
+    }
   }
 }
 
-function goDownload() {
-  if (!latestRelease.value) return;
-  void appApi
-    .openExternal(latestRelease.value.url)
-    .catch((e) => ui.toast(errorText(e), "error"));
+async function startUpdate() {
+  const rel = latest.value;
+  if (!rel?.asset || updBusy.value) return;
+
+  got.value = 0;
+  total.value = 0;
+  updError.value = "";
+  updHint.value = "";
+  updState.value = "downloading";
+
+  try {
+    const path = await appApi.updateDownload(rel.asset.url, rel.asset.name);
+    updState.value = "installing";
+    await appApi.updateApply(path);
+    // Windows 会在这里之前退出进程；能走到下一行的只有 Android
+    if (platformKind.value === "android") {
+      ui.toast("已打开系统安装器，按提示完成安装", "success");
+    }
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    // 用户自己取消：回到「可更新」，不是错误
+    if (err?.code === "CANCELLED") {
+      updState.value = "available";
+      return;
+    }
+    // 安卓「安装未知应用」没授权：Kotlin 侧已把用户送到授权页，
+    // 退回可点击状态并留一条提示，比一个死掉的错误框有用
+    if (err?.code === "PERMISSION") {
+      updState.value = "available";
+      updHint.value = err.message ?? "请先在系统设置里允许本应用安装应用";
+      return;
+    }
+    updState.value = "error";
+    updError.value = errorText(e);
+  }
 }
+
+async function cancelDownload() {
+  try {
+    await appApi.updateCancel();
+  } catch {
+    /* 已经下完了：状态会由 updateApply 那一步接管 */
+  }
+}
+
+function openReleasePage() {
+  const url = latest.value?.page || channelInfo.value.page;
+  void appApi.openExternal(url).catch((e) => ui.toast(errorText(e), "error"));
+}
+
+let unlistenProgress: UnlistenFn | null = null;
+
+onMounted(async () => {
+  try {
+    appVersion.value = await appApi.getVersion();
+  } catch {
+    /* 非 Tauri 环境（纯浏览器开发）保持空 */
+  }
+  unlistenProgress = await on<UpdateProgress>(EVT.updateProgress, (p) => {
+    got.value = p.downloaded;
+    total.value = p.total;
+  });
+});
+
+onBeforeUnmount(() => {
+  unlistenProgress?.();
+});
 </script>
 
 <template>
@@ -1467,9 +1675,11 @@ function goDownload() {
             <div class="upd-row">
               <div class="label">
                 <div>版本更新</div>
-                <div class="desc">对照 GitHub Releases 检查是否有新版本</div>
+                <div class="desc">
+                  检查并安装新版本 · 国内渠道直连 Gitee，不用跳浏览器
+                </div>
               </div>
-              <button class="btn small" :disabled="updState === 'checking'" @click="checkUpdate">
+              <button class="btn small" :disabled="updBusy" @click="checkUpdate">
                 <Icon
                   name="refresh"
                   :size="14"
@@ -1479,21 +1689,83 @@ function goDownload() {
               </button>
             </div>
 
+            <!-- 渠道切换：国内默认，国内直连 Gitee 更快 -->
+            <div class="upd-chan" role="group" aria-label="更新渠道">
+              <button
+                v-for="c in channelList"
+                :key="c.id"
+                class="upd-chan-btn"
+                :class="{ on: channel === c.id }"
+                :disabled="updState === 'downloading' || updState === 'installing'"
+                @click="setChannel(c.id)"
+              >
+                {{ c.name }}<span class="host">{{ c.host }}</span>
+              </button>
+            </div>
+
             <div v-if="updState === 'latest'" class="upd-result ok">
               ✓ 已是最新版本（v{{ appVersion }}）
             </div>
+
             <div v-else-if="updState === 'available'" class="upd-result new">
               <div class="upd-new-head">
                 <span>
-                  发现新版本 <b>{{ latestRelease?.tag }}</b>
+                  发现新版本 <b>{{ latest?.tag }}</b>
                 </span>
-                <button class="btn small" @click="goDownload">前往下载</button>
+                <span class="upd-actions">
+                  <button v-if="canInApp" class="btn small primary" @click="startUpdate">
+                    立即更新
+                  </button>
+                  <button class="btn small" @click="openReleasePage">
+                    {{ canInApp ? "下载页" : "前往下载" }}
+                  </button>
+                </span>
               </div>
-              <pre v-if="latestRelease?.notes" class="upd-notes">{{ latestRelease.notes }}</pre>
+              <p v-if="updHint" class="upd-hint">{{ updHint }}</p>
+              <p v-else-if="canInApp" class="upd-hint info">
+                {{
+                  store.isAndroid
+                    ? "下载完成后交给系统安装器，全程不用打开浏览器"
+                    : "下载完成后自动替换并重启，无需重新安装"
+                }}
+              </p>
+              <pre v-if="latest?.notes" class="upd-notes">{{ latest.notes }}</pre>
             </div>
+
+            <div v-else-if="updState === 'downloading'" class="upd-result new">
+              <div class="upd-new-head">
+                <span>正在下载 {{ latest?.tag }}</span>
+                <span class="mono">{{ total ? pct + "%" : "" }} {{ sizeText }}</span>
+              </div>
+              <div class="upd-bar" :class="{ unknown: !total }">
+                <i :style="{ width: total ? pct + '%' : '100%' }" />
+              </div>
+              <div class="upd-foot">
+                <span class="desc">
+                  {{ store.isAndroid ? "完成后会打开系统安装器" : "完成后会自动重启完成更新" }}
+                </span>
+                <button class="link" @click="cancelDownload">取消</button>
+              </div>
+            </div>
+
+            <div v-else-if="updState === 'installing'" class="upd-result new">
+              <div class="upd-new-head">
+                <span>
+                  {{
+                    store.isAndroid
+                      ? "正在打开系统安装器…"
+                      : "更新包已就绪，正在重启应用…"
+                  }}
+                </span>
+              </div>
+            </div>
+
             <div v-else-if="updState === 'error'" class="upd-result err">
               <span>{{ updError }}</span>
-              <button class="link" @click="checkUpdate">重试</button>
+              <span class="upd-actions">
+                <button class="link" @click="checkUpdate">重试</button>
+                <button class="link" @click="openReleasePage">下载页</button>
+              </span>
             </div>
           </div>
 
@@ -2163,6 +2435,98 @@ input[type="range"]::-webkit-slider-thumb {
   justify-content: space-between;
   gap: 10px;
   font-size: 13px;
+}
+
+/* 渠道切换：两段式分段控件。国内默认，所以不加「推荐」角标也够直观 */
+.upd-chan {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 12px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.upd-chan-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.upd-chan-btn .host {
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  opacity: 0.65;
+}
+.upd-chan-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+.upd-chan-btn.on {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+}
+.upd-chan-btn.on .host {
+  color: var(--accent);
+  opacity: 1;
+}
+.upd-chan-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.upd-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.upd-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #e0a94a;
+}
+.upd-hint.info {
+  color: var(--text-3);
+}
+/* 下载进度：total 不明时（少数代理会吞掉 Content-Length）走呼吸条 */
+.upd-bar {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--text-3) 20%, transparent);
+}
+.upd-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.2s ease;
+}
+.upd-bar.unknown i {
+  animation: upd-pulse 1.2s ease-in-out infinite;
+}
+@keyframes upd-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+.upd-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
 }
 .upd-notes {
   margin: 0;

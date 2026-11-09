@@ -37,6 +37,11 @@ pub enum AppError {
     #[error("unsupported: {0}")]
     Unsupported(String),
 
+    /// 用户主动取消（目前只有「应用内更新」的下载会走到）。
+    /// 单独立一个变体：前端要把它当成正常收尾而不是错误弹窗。
+    #[error("cancelled: {0}")]
+    Cancelled(String),
+
     #[error("tauri: {0}")]
     Tauri(#[from] tauri::Error),
 }
@@ -54,6 +59,7 @@ impl AppError {
             Self::Invalid(_) => "INVALID",
             Self::Permission(_) => "PERMISSION",
             Self::Unsupported(_) => "UNSUPPORTED",
+            Self::Cancelled(_) => "CANCELLED",
             Self::Tauri(_) => "TAURI",
         }
     }
@@ -73,6 +79,9 @@ impl AppError {
     pub fn invalid(e: impl std::fmt::Display) -> Self {
         Self::Invalid(e.to_string())
     }
+    pub fn cancelled(e: impl std::fmt::Display) -> Self {
+        Self::Cancelled(e.to_string())
+    }
 
     /// 去掉 `kind: ` 前缀后的原始描述。
     ///
@@ -87,7 +96,8 @@ impl AppError {
             | Self::NotFound(s)
             | Self::Invalid(s)
             | Self::Permission(s)
-            | Self::Unsupported(s) => s.clone(),
+            | Self::Unsupported(s)
+            | Self::Cancelled(s) => s.clone(),
             Self::Io(e) => e.to_string(),
             Self::Db(e) => e.to_string(),
             Self::Tauri(e) => e.to_string(),

@@ -169,6 +169,57 @@ fn query_inner(action: &str) -> Option<String> {
     Some(text)
 }
 
+/// 调 Kotlin 的 `LeonBridge.installApk(path)`：把下载好的 APK 交给系统安装器。
+///
+/// 返回空串表示已经拉起安装器；非空是给用户看的原因
+/// （最常见的是还没授予「安装未知应用」，Kotlin 侧会顺手把用户送到授权页）。
+pub fn install_apk(path: &str) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        install_apk_inner(path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = path;
+        Err("仅 Android 支持 APK 安装".into())
+    }
+}
+
+#[cfg(target_os = "android")]
+fn install_apk_inner(path: &str) -> Result<String, String> {
+    use jni::objects::{JString, JValue};
+    use jni::JavaVM;
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let class = bridge_class(&mut env)?;
+    let arg: JString = env.new_string(path).map_err(|e| e.to_string())?.into();
+
+    let ret = match env.call_static_method(
+        class,
+        "installApk",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&arg)],
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            // JNI 里挂了异常不清掉，返回 Java 时会变成 FATAL EXCEPTION
+            let _ = env.exception_clear();
+            return Err(format!("调用安装器失败：{e}"));
+        }
+    };
+    let obj = ret.l().map_err(|e| e.to_string())?;
+    if obj.is_null() {
+        return Ok(String::new());
+    }
+    let text: String = env
+        .get_string(&JString::from(obj))
+        .map_err(|e| e.to_string())?
+        .into();
+    Ok(text)
+}
+
 pub fn sdk_int() -> Option<i32> {
     #[cfg(target_os = "android")]
     {

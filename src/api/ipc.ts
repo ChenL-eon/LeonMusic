@@ -62,6 +62,7 @@ export const EVT = {
   bufferProgress: "leon://player/buffer-progress",
   ended: "leon://player/track-ended",
   settingsChanged: "leon://settings/changed",
+  updateProgress: "leon://update/progress",
 } as const;
 
 export const player = {
@@ -244,7 +245,20 @@ export const app = {
   getVersion: () => getVersion(),
   /** 用系统默认浏览器打开 http(s) 链接（「更新与关于」→「前往下载」） */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
+  /** 下载更新包到本地缓存，返回落盘路径；进度走 EVT.updateProgress */
+  updateDownload: (url: string, fileName: string) =>
+    invoke<string>("update_download", { url, fileName }),
+  /** 安装已下载的更新包：Windows 替换重启，Android 拉起系统安装器 */
+  updateApply: (archive: string) => invoke<void>("update_apply", { archive }),
+  /** 取消进行中的下载（半成品会被删除） */
+  updateCancel: () => invoke<void>("update_cancel"),
 };
+
+/** 应用内更新的下载进度（字节；total 为 0 表示服务端没给长度） */
+export interface UpdateProgress {
+  downloaded: number;
+  total: number;
+}
 
 /** 订阅事件，返回取消函数。组件卸载时必须调用。 */
 export async function on<T>(event: string, cb: (payload: T) => void): Promise<UnlistenFn> {

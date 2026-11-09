@@ -23,7 +23,7 @@
 //! 首次进入时引导用户把应用加入「不受限制」白名单（`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
 //! 只在用户主动点击时才能弹，不能静默申请）。
 
-mod bridge;
+pub(crate) mod bridge;
 
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
