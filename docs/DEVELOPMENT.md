@@ -426,9 +426,18 @@ base64 LRC，插件内纯 JS 解码。QQ 的匿名播放直链已关（`vkey` 50
 两份副本要同步维护。宿主把搜索结果的 id 包成 `qq:<mid>`，但通过
 `pluginTrackId`（原始 mid）传回插件。`unblock` 关掉时明确报错，不放试听。
 桌面首页内联搜索、独立搜索页、移动端搜索都按
-`capabilities.includes("search")` 动态列源，新增音源插件无需再改 UI；
-首页的选择存在 `localStorage` 的 `leonmusic.home.searchSource`，插件被停用
-后回落到第一个可用源，切换时若已有关键词会立刻按新音源重搜。
+`capabilities.includes("search")` 动态列源，新增音源插件无需再改 UI。
+当前音源是 `useSettingsStore().searchSource` 的全局共享状态：以前只有首页
+记 localStorage、另外两个页面各从插件列表第一项起步，现在三个入口一处
+切换处处同步。桌面两处原本是原生 `<select>` —— WebView2 的弹出层由系统
+绘制成灰色方角列表，CSS 改不动 —— 现统一换成
+`components/SourceSelect.vue` 的应用内弹层（主题配色、当前项打勾、点击
+外部 / Esc 关闭、方向键可操作）。
+是否跨重启保留由 `Settings.rememberSearchSource`（默认 `true`）控制：
+开启时把 id 写进 `localStorage` 的 `leonmusic.home.searchSource`（沿用 1.1.1
+的旧 key，升级不丢已选的 QQ 音乐），关闭时清掉历史值、每次启动回默认源；
+插件停用 / 卸载导致记住的 id 不存在时，一律回落到可用列表第一个。
+切换时若已有关键词会立刻按新音源重搜。
 「设置 → 播放 → 在线音质」会写进所有声明了 `level` 配置项的插件
 （按 manifest 判定，不写死 id）。
 
@@ -688,13 +697,27 @@ Obsidian / HA 音乐插件）都有相同记录：判定依据是客户端指纹
 完整链接（`music.163.com/playlist?id=…`）或 `163cn.tv` 短链粘进去即可，
 短链由宿主命令 `resolve_redirect` 跟随重定向解析出歌单 id，导入免登录。
 
-**QQ 音乐歌单导入**（插件 2.22.0）：分享链（`y.qq.com/n/ryqq/playlist/<id>`、
+**QQ 音乐歌单导入**（插件 2.23.0）：分享链（`y.qq.com/n/ryqq/playlist/<id>`、
 `i.y.qq.com/…/taoge.html?id=<id>`、`c6.y.qq.com/base/fcgi-bin/u?__=…` 短链）
 识别成 `qq` 平台后，前端把歌单标识拼成 `qq:<disstid>` 交给 netease 插件的
 「外部歌单」分支；插件用 `fcg_ucc_getcdinfo_byids_cp.fcg`（带
 `Referer: y.qq.com`）匿名拉全量曲目，返回的曲目 id 带 `qq:` 前缀
-（`qq:<songmid>`），封面 / 歌单名 / 时长都按接口原值落库。**只写本地库、
+（`qq:<songmid>`），歌单名 / 时长按接口原值落库。**只写本地库、
 不碰账号**：不要求登录，也不会往网易云或 QQ 写任何东西。
+
+**单曲封面**：接口不给现成图片 URL，但 `songlist` 每首都带 `albummid`
+（2026-11-09 实测 1292 首歌单覆盖率 100%），按
+`https://y.gtimg.cn/music/photo_new/T002R300x300M000<albummid>.jpg`
+拼专辑封面；用 `songmid` 拼会 404，必须用专辑 mid。CDN 不需要 Referer，
+CSP 的 `img-src https:` 已放行；极少数缺 `albummid` 的老歌退回歌单封面。
+独立 qq 插件的 `coverUrl()` 用同一规则，改域名 / 尺寸时两处要同步。
+
+**存量补全**：2.22.0 及之前误把曲目 `coverUrl` 留空（以为宿主有曲目级
+回退，实际没有），当时导入的曲目封面全为空。`src/utils/qqCoverBackfill.ts`
+在曲库读完后按 `remoteKey = netease:qq:*` 找出这些歌单，重拉一次云端详情
+只 upsert 有封面的曲目（`ON CONFLICT` 覆盖 `cover_url`），不新建歌单、
+不改歌单成员；成功后写 localStorage 标记，离线 / 频控失败不写标记，
+下次启动自动重试。账号页「补全已导入歌单封面」按钮可 `force` 立即触发。
 
 播放侧拿不到 QQ 的 vkey（匿名 `uin=0` 实测返回 `500003/860100001`），
 所以 `getStreamUrl` 见到 `qq:` 前缀就跳官方查询，直接按「歌名 + 歌手」
@@ -837,6 +860,18 @@ let class = env.call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lan
 就必须在 5 秒内 `startForeground()`，否则 `ForegroundServiceDidNotStartInTimeException`。
 为了满足契约先弹「未在播放」再撤掉，用户会看到通知栏闪一下。
 所以冷启动走 `startService`，真正开始播放时才 `enterForeground()` 提升。
+
+**release 包没有通知栏 / 锁屏，但 debug 包正常：R8 把 JNI 入口混淆了**
+
+Rust 是按**方法名**调 Kotlin 的：
+`call_static_method(class, "dispatch", "(Ljava/lang/String;Ljava/lang/String;)V", …)`。
+R8 看不到这层引用（默认规则只保 `native` 方法），release 构建里普通的
+`@JvmStatic` 静态方法可能被改名甚至裁掉，结果是 `NoSuchMethodError` ——
+Rust 侧只记一条 `warn`，播放照常，但通知栏与锁屏全程空白。
+`android-overlay/proguard/leon-jni.pro` 显式 keep `attach` / `dispatch` /
+`query` / `nativeCommand` / `nativeSnapshot`，并保住 `MediaButtonReceiver`；
+`apply.py` 把它放到 `app/`，由 `fileTree(".") { include("**/*.pro") }` 自动收进
+R8 配置。**以后新增 JNI 入口必须同步更新这个文件**，否则只在 release 包里复发。
 
 **`clear` 不能顺手 `stopSelf()`**
 
@@ -1011,6 +1046,7 @@ WSOLA 拉伸比 `T = P / S`（保持音高只改时长），再按 `R = P` 重�
 | 播放按钮图标居中（本次） | `npm run build` + 无头 Edge 390×844 dpr3（把 path 换成 pause-f 后量几何） | ✅ 根因是 `class="ctrl main"` 撞上全局 `.main { padding: 16px 14px 6px }`（<860px 生效），grid 内容区被压得下移 5px；改 `.primary` + `.ctrl{padding:0}` 后 svg 中心 = 按钮中心、双条 bbox 中心 = 按钮中心（delta 0,0）；`pause-f` 同时右移 0.5 单位，几何中心落回 viewBox 的 12 |
 | 智能音质 / 移动端设置微调（本次） | `npm run typecheck` + `npm run build` + 无头 Edge 390×844 / 1180×820（假 Tauri 宿主）+ `node build/test_resolve_chain.cjs` + `cargo test --lib` | ✅ 移动端「外观」页不再渲染主色色板（桌面端保留）；歌词字号步进框从「数字挤在左侧、右边一片空白」改为值靠左、箭头贴右并加分隔线，高度 44px（横屏回退紧凑样式）；「播放」页首行新增智能音质开关（默认开启）。后端：`Track.qualityHint` 只在降级重试时出现，`smart_next_level` 逐档下降并在最低档返回 None；`EVT_PLAY_FAILED` → `resolve_and_play` 重解析，解析失败也继续降档；失败终态补写 `PlaybackStatus::Error`（不再永远停在 Buffering）；异步解析前后都校验队列当前项，用户中途切歌时丢弃过期结果，不会被拽回上一首。插件 2.21.0；JS 40 passed / Rust 53 passed |
 | 官方 320k 时仍取 FLAC（本次） | 真实联网 `getStreamUrl` + `node build/test_resolve_chain.cjs` | ✅ 根因：官方 eapi 给「非试听 320k」时旧逻辑直接 return，第三方链从未被问；《水之湄》实测酷我 BD 稳定给 2000k FLAC（连测 6 次 900）。改后 `getStreamUrl` 返回 `source=resolved / format=flac / bitrate=900000 / downgraded=false`；解析只到 320/128 时保留官方链接；官方给 FLAC 时零解析请求。插件 2.20.0，单测 37 passed / 0 failed，Rust 51 passed |
+| 安卓设置分类 + 通知栏/锁屏（本次） | `npm run build` + `cargo check`（Windows / `aarch64-linux-android` 双 target）+ `./gradlew :app:compileUniversalDebugKotlin` + release APK 静态核验 | ✅ 新建 `MobileSettings.vue` 分组卡片首页（4 组 9 项 + 搜索设置），桌面 `Settings.vue` 一行未改；`MobileShell` 让系统返回先消费「详情 → 分类」。修掉四个真实缺陷：① `seek:<ms>` 在 `dispatch_from_kotlin` 无分支，锁屏进度拖完弹回；② 缺 `setMediaButtonReceiver` 与 manifest receiver，蓝牙/线控失效；③ 缺 `setSessionActivity`，锁屏卡片点不开 App；④ **release 包 R8 把 `LeonBridge.query` 等 JNI 按名调用的静态方法裁掉**（dex 里原本找不到 `query` / `notificationGranted` / `sessionActive`）—— `android-overlay/proguard/leon-jni.pro` 显式 keep 后全部回来。新增「通知与锁屏」面板：权限/会话/前台状态、两个开关、跳系统通知设置。产物 `E:\Test\LeonMusic-1.1.1-android-arm64-media.apk` 22,706,791 B，sha256 `f0628bff…8ff56`，720 条目 / `testzip()` OK / EOCD 尾部 0 B / v2 签名 `ebb3bdb8…a3c133`（与 1.1.1 一致，可覆盖安装）/ 仅 arm64 / dist 四个资源名与三个新 command 名全部命中 `.so`。版本号未动（仍 1.1.1 / versionCode 3），未提交未发布 |
 
 单测覆盖：WSOLA 拉伸比、重采样倍率、队列三种循环行为、LRC 五种解析
 （普通 / 多时间标签 / 逐字 / 偏移 / 同时间戳译文合并）、文件名解析、
