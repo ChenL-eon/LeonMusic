@@ -18,6 +18,7 @@
  *   --body-file <路径>   可选。从文件读取描述（优先于 --body）
  *   --target <分支>      可选。创建 tag 时指向的分支/提交，默认取仓库默认分支
  *   --prerelease         可选。标记为预览版（也可写 --prerelease=0 关掉）
+ *   --force              可选。默认跳过同名且字节数一致的附件，加了就强制重传
  *   --dry-run            可选。只打印计划，不发任何请求
  *
  * 环境变量：
@@ -82,6 +83,7 @@ function parseArgs(argv) {
         else out.prerelease = true;
         break;
       case "--dry-run": out.dryRun = true; break;
+      case "--force": out.force = true; break;
       case "-h":
       case "--help": out.help = true; break;
       default: die(`未知参数 ${raw}`);
@@ -103,6 +105,7 @@ function printHelp() {
       "  --body-file <path>   从文件读描述（可选）",
       "  --target <branch>    创建 tag 的落点（默认取仓库默认分支）",
       "  --prerelease         标记预览版",
+      "  --force              同名同大小的附件也重传（默认跳过）",
       "  --dry-run            只打印计划",
     ].join("\n"),
   );
@@ -373,8 +376,19 @@ async function main() {
 
   for (const f of files) {
     const name = path.basename(f);
+    const size = fs.statSync(f).size;
+    const sameName = assets.filter((a) => a.name === name);
+
+    // 已存在且字节数一致 → 视为同一个产物，跳过。
+    // 跨国上传 36MB 要几十分钟，重跑流水线不该再传一遍。
+    // 需要重传时加 --force（同名但大小变了仍然会自动重传）。
+    if (!args.force && sameName.some((a) => a.size === size)) {
+      console.log(`  = ${name} 已存在且大小一致，跳过上传`);
+      continue;
+    }
+
     // 先清同名旧附件，避免重复执行后出现两份
-    for (const old of assets.filter((a) => a.name === name)) {
+    for (const old of sameName) {
       await api("DELETE", `/releases/${release.id}/attach_files/${old.id}`);
       console.log(`  · 已删除同名旧附件 ${name}`);
     }
