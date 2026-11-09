@@ -122,6 +122,53 @@ fn bridge_class<'local>(
     }
 }
 
+/// 调 Kotlin 的 `LeonBridge.query(action)` 取一段 JSON。
+///
+/// 设置页用它读通知权限 / MediaSession / 前台服务的真实状态。
+/// 与 [call] 一样走 `bridge_class()`，避免在 Rust 线程上 `find_class` 失败。
+pub fn query(action: &str) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        query_inner(action)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = action;
+        None
+    }
+}
+
+#[cfg(target_os = "android")]
+fn query_inner(action: &str) -> Option<String> {
+    use jni::objects::{JString, JValue};
+    use jni::JavaVM;
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let class = bridge_class(&mut env).ok()?;
+    let key: JString = env.new_string(action).ok()?.into();
+
+    let ret = match env.call_static_method(
+        class,
+        "query",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&key)],
+    ) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = env.exception_clear();
+            return None;
+        }
+    };
+    let obj = ret.l().ok()?;
+    if obj.is_null() {
+        return None;
+    }
+    let text: String = env.get_string(&JString::from(obj)).ok()?.into();
+    Some(text)
+}
+
 pub fn sdk_int() -> Option<i32> {
     #[cfg(target_os = "android")]
     {
@@ -176,6 +223,14 @@ pub fn dispatch_from_kotlin(action: &str) {
         // 导航播报 / 通知提示音 → 只压低音量，不打断播放
         "duck" => EngineCommand::Duck(true),
         "unduck" => EngineCommand::Duck(false),
+        // 锁屏 / 通知进度条拖动：Kotlin 的 onSeekTo 发的是 "seek:<毫秒>"。
+        // 早期这里没有分支，命令被静默丢掉，表现为锁屏进度拖完立刻弹回。
+        _ if action.starts_with("seek:") => {
+            let Ok(ms) = action["seek:".len()..].parse::<u64>() else {
+                return;
+            };
+            EngineCommand::Seek(ms)
+        }
         _ => return,
     };
     if let Some(tx) = COMMAND_SINK.lock().as_ref() {

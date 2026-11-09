@@ -2,6 +2,8 @@ package com.leonmusic.player
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.util.Log
 import org.json.JSONObject
 
@@ -58,6 +60,11 @@ class LeonBridge private constructor() {
         private val lastDoc = LinkedHashMap<String, String>()
 
         private const val MAX_DOC = 3
+
+        /** 通知栏 / 锁屏开关存在原生侧：前台服务重启后不依赖 WebView 也能读到 */
+        internal const val PREFS_MEDIA = "leon.media"
+        internal const val KEY_NOTIFICATION = "notification"
+        internal const val KEY_LOCKSCREEN = "lockscreen"
 
         /**
          * 由 [MainActivity] 在 `onCreate` 调用。
@@ -147,6 +154,23 @@ class LeonBridge private constructor() {
                     WindowInsetsBridge.setSystemBarAppearance(json.optBoolean("dark"))
                 }
 
+                // 设置页的「通知栏播放控制 / 锁屏播放状态」开关。
+                // 存 SharedPreferences 而不是只留在 WebView：Activity 被回收、
+                // 前台服务重建时，PlaybackService 自己读得到同一份值。
+                "mediaPrefs" -> {
+                    val json = parse(payload) ?: return
+                    val ctx = appContext ?: return
+                    ctx.getSharedPreferences(PREFS_MEDIA, Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean(KEY_NOTIFICATION, json.optBoolean(KEY_NOTIFICATION, true))
+                        .putBoolean(KEY_LOCKSCREEN, json.optBoolean(KEY_LOCKSCREEN, true))
+                        .apply()
+                    PlaybackService.instance?.onMediaPrefsChanged()
+                }
+
+                // 用户拒绝过 POST_NOTIFICATIONS：从设置页跳系统通知设置自行开启
+                "notificationSettings" -> openNotificationSettings()
+
                 else -> Log.w(TAG, "unknown action: $action")
             }
         }
@@ -217,6 +241,57 @@ class LeonBridge private constructor() {
         } catch (t: Throwable) {
             Log.w(TAG, "bad payload: $payload")
             null
+        }
+
+        // ------------------------------------------------------------------
+        // Rust 同步查询（设置页展示真实状态，而不是"应该支持"的静态文案）
+        // ------------------------------------------------------------------
+
+        /**
+         * `bridge.rs::query_inner` 调的就是这个静态方法，签名必须是
+         * `(Ljava/lang/String;)Ljava/lang/String;`。
+         *
+         * 只支持 `"media"`：返回通知权限、MediaSession、前台服务与两个开关。
+         * 拿不到 Application context（Tauri setup 之前）时返回 null，
+         * Rust 侧会退化成全 false，前端照常渲染。
+         */
+        @JvmStatic
+        fun query(action: String): String? {
+            if (action != "media") return null
+            val ctx = appContext ?: return null
+            val prefs = ctx.getSharedPreferences(PREFS_MEDIA, Context.MODE_PRIVATE)
+            val svc = PlaybackService.instance
+            return JSONObject()
+                .put("notificationGranted", Permissions.canPostNotifications(ctx))
+                .put("sessionActive", svc?.isSessionActive == true)
+                .put("foreground", svc?.isForeground == true)
+                .put("notificationControl", prefs.getBoolean(KEY_NOTIFICATION, true))
+                .put("lockscreenControl", prefs.getBoolean(KEY_LOCKSCREEN, true))
+                .toString()
+        }
+
+        /**
+         * 打开系统通知设置。部分 OEM 没有 `ACTION_APP_NOTIFICATION_SETTINGS`，
+         * 退回应用详情页，两条路都带 `FLAG_ACTIVITY_NEW_TASK`（从 Service 里跳）。
+         */
+        private fun openNotificationSettings() {
+            val ctx = appContext ?: return
+            val pkg = ctx.packageName
+            val candidates = listOf(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, pkg),
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:$pkg")),
+            )
+            for (intent in candidates) {
+                try {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ctx.startActivity(intent)
+                    return
+                } catch (t: Throwable) {
+                    Log.w(TAG, "open notification settings failed: ${t.message}")
+                }
+            }
         }
 
         // ------------------------------------------------------------------

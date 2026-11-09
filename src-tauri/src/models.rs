@@ -5,6 +5,25 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Android 通知栏 / 锁屏媒体控制的实时状态。
+///
+/// 桌面端没有 MediaSession，统一返回全 false（前端只在安卓设置页展示）。
+/// 字段由 Kotlin `LeonBridge.query("media")` 组装成同名 JSON。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaStatus {
+    /// Android 13+ 的 POST_NOTIFICATIONS 是否已授予
+    pub notification_granted: bool,
+    /// MediaSession 是否处于 active（锁屏媒体卡片靠它）
+    pub session_active: bool,
+    /// 前台服务是否已提升（通知常驻）
+    pub foreground: bool,
+    /// 用户在设置里的「通知栏播放控制」开关
+    pub notification_control: bool,
+    /// 用户在设置里的「锁屏播放状态」开关
+    pub lockscreen_control: bool,
+}
+
 /// 曲目来源。本地文件与插件音源在同一个库里共存。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]

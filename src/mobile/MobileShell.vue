@@ -1,14 +1,14 @@
 <script setup lang="ts">
 /** 移动端外壳：一级页 + 二级页 + 全屏播放覆盖层 + 悬浮胶囊导航。
  *  桌面完全不走这里（App.vue 按 860px 断点分流），改动不会波及侧栏布局。 */
-import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch, type Component } from "vue";
 
 import Icon from "@/components/Icon.vue";
 import AccountView from "@/views/Account.vue";
 import Library from "@/views/Library.vue";
 import PlaylistView from "@/views/PlaylistView.vue";
-import SettingsView from "@/views/Settings.vue";
 import MobileHome from "@/mobile/MobileHome.vue";
+import MobileSettings from "@/mobile/MobileSettings.vue";
 import MobileListPage from "@/mobile/MobileListPage.vue";
 import MobileMe from "@/mobile/MobileMe.vue";
 import MobileNav from "@/mobile/MobileNav.vue";
@@ -42,8 +42,12 @@ const SUB_VIEWS: Partial<Record<Page, Component>> = {
   library: Library,
   playlist: PlaylistView,
   account: AccountView,
-  settings: SettingsView,
+  // 移动端走独立的分组设置壳；桌面 Settings.vue 一行不动
+  settings: MobileSettings,
 };
+
+/** 当前二级页组件实例。设置页暴露 back() 让系统返回先消费「详情 → 分类」。 */
+const subView = shallowRef<{ back?: () => boolean } | null>(null);
 
 const lastTab = ref<MobileTab>("home");
 const listKind = ref<ListKind | null>(null);
@@ -70,7 +74,10 @@ function onSysBack() {
   if (playerOpen.value) {
     playerOpen.value = false;
   } else if (isSub.value) {
-    back();
+    // 设置页有两级：系统返回先让详情页退回分类首页，分类首页才退出设置。
+    // 其它二级页没有 back()（或返回 false），照旧走 outer back()。
+    const consumed = ui.page === "settings" && subView.value?.back?.() === true;
+    if (!consumed) back();
   }
   // 一级页：吞掉返回（不退出应用）
   history.pushState({ mguard: true }, "");
@@ -241,7 +248,8 @@ function navigate(tab: MobileTab, record = true) {
       <!-- 二级页：本地音乐 / 歌单 / 账号 / 设置 / 最近 / 已缓存 -->
       <transition name="m-slide">
         <div v-if="isSub" class="m-sub">
-          <div class="m-sub-head">
+          <!-- 分组设置页自带头部（返回 + 标题 + 搜索），这里不再重复一层 -->
+          <div v-if="ui.page !== 'settings'" class="m-sub-head">
             <button class="m-icon" aria-label="返回" @click="back">
               <Icon name="chevron" :size="22" class="back-chev" />
             </button>
@@ -256,7 +264,14 @@ function navigate(tab: MobileTab, record = true) {
                 :tracks="listTracks"
                 @back="back"
               />
-              <component :is="SUB_VIEWS[ui.page]" v-else :key="ui.page" />
+              <component
+                :is="SUB_VIEWS[ui.page]"
+                v-else
+                :key="ui.page"
+                ref="subView"
+                @back="back"
+                @open-sub="openSub"
+              />
             </KeepAlive>
           </div>
         </div>

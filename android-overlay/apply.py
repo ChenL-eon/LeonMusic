@@ -10,11 +10,13 @@ Tauri 的 `android init` 会生成 `src-tauri/gen/android/`，而这个目录是
    （已存在的文件先备份成 `*.orig`，方便对比 Tauri 模板改动）
 2. 把 `manifest/permissions.xml` 插到 `<manifest>` 下
 3. 把 `manifest/application-children.xml` 插到 `<application>` 内
-4. 给 `<application>` 补 `android:usesCleartextTraffic="true"`
+4. 把 `manifest/media-button-receiver.xml` 插到 `<application>` 内（媒体键广播）
+5. 把 `proguard/leon-jni.pro` 放到 `app/`（R8 不能混淆 JNI 按名调用的方法）
+6. 给 `<application>` 补 `android:usesCleartextTraffic="true"`
    （在线音源插件常用 http 接口；如需更精细请改用 networkSecurityConfig）
-5. 给 `app/build.gradle.kts` 加 `androidx.media:media` 依赖
-6. 把 minSdk 兜底抬到 26（cpal 走 Oboe→AAudio，`libaaudio.so` 从 API 26 起才有）
-7. 存在 `android-overlay/keystore.properties` 时注入 release 签名配置
+7. 给 `app/build.gradle.kts` 加 `androidx.media:media` 依赖
+8. 把 minSdk 兜底抬到 26（cpal 走 Oboe→AAudio，`libaaudio.so` 从 API 26 起才有）
+9. 存在 `android-overlay/keystore.properties` 时注入 release 签名配置
 
 所有步骤都是幂等的：重复执行不会产生重复节点。
 
@@ -155,6 +157,48 @@ def merge_manifest(project: Path, dry: bool) -> bool:
         return False
     if not dry:
         path.write_text(text, encoding="utf-8")
+    return True
+
+
+def inject_media_button_receiver(project: Path, dry: bool) -> bool:
+    """注入 MediaButtonReceiver（蓝牙 / 线控媒体键）。
+
+    这一段带 `<intent-filter>` 子元素，不是自闭合标签，所以不能走
+    [merge_manifest] 里按 `<service/>` 去重的那条路径，单独按类名判重。
+    """
+    path = project / "app" / "src" / "main" / "AndroidManifest.xml"
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8")
+    if "androidx.media.session.MediaButtonReceiver" in text:
+        return False
+    idx = text.find("</application>")
+    if idx < 0:
+        log("!! AndroidManifest.xml 里没有 </application>，跳过 MediaButtonReceiver")
+        return False
+    block = _indent(_read_fragment("media-button-receiver.xml"))
+    text = text[:idx] + block + "\n\n" + text[idx:]
+    log("+ manifest: MediaButtonReceiver（蓝牙/线控媒体键）")
+    if not dry:
+        path.write_text(text, encoding="utf-8")
+    return True
+
+
+def copy_proguard(project: Path, dry: bool) -> bool:
+    """复制 JNI keep 规则到 app/ 根目录。
+
+    `app/build.gradle.kts` 用 `fileTree(".") { include("**/*.pro") }` 收集规则，
+    所以只要放进 app/ 就会被 R8 读取，不用改生成物的 gradle 文件。
+    """
+    src = ROOT / "proguard" / "leon-jni.pro"
+    if not src.is_file():
+        return False
+    dst = project / "app" / "leon-jni.pro"
+    if dst.exists() and dst.read_bytes() == src.read_bytes():
+        return False
+    log("+ app/leon-jni.pro（JNI 入口 keep 规则）")
+    if not dry:
+        dst.write_bytes(src.read_bytes())
     return True
 
 
@@ -346,6 +390,8 @@ def main() -> int:
     n = copy_sources(project, args.dry_run)
     print()
     merge_manifest(project, args.dry_run)
+    inject_media_button_receiver(project, args.dry_run)
+    copy_proguard(project, args.dry_run)
     patch_gradle(project, args.dry_run)
     patch_min_sdk(project, args.dry_run)
     patch_signing(project, args.dry_run)

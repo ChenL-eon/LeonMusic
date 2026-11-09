@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -21,6 +22,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.media.session.MediaButtonReceiver
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -82,6 +84,15 @@ class PlaybackService : Service() {
     @Volatile private var durationMs = 0L
     @Volatile private var foreground = false
 
+    /** 设置页的两个开关，默认全开；从原生 SharedPreferences 读，WebView 死了也不丢 */
+    @Volatile private var notificationControl = true
+    @Volatile private var lockscreenControl = true
+
+    /** 供 `LeonBridge.query("media")` 读，设置页展示真实状态 */
+    val isForeground: Boolean get() = foreground
+    val isSessionActive: Boolean
+        get() = lockscreenControl && ::session.isInitialized && session.isActive
+
     private var title = "未在播放"
     private var artist = ""
     private var album = ""
@@ -96,6 +107,7 @@ class PlaybackService : Service() {
         super.onCreate()
         instance = this
         createChannel()
+        readMediaPrefs()
 
         session = MediaSessionCompat(this, "LeonMusic").apply {
             setFlags(
@@ -103,7 +115,14 @@ class PlaybackService : Service() {
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
             setCallback(sessionCallback)
-            isActive = true
+            // 锁屏媒体卡片 / 通知卡片被点时回到播放器，而不是开了个空页面
+            setSessionActivity(openIntent())
+            // 蓝牙耳机、线控的媒体键：显式指向 MediaButtonReceiver，
+            // Android 8+ 起隐式广播受限，必须带 ComponentName。
+            setMediaButtonReceiver(mediaButtonIntent())
+            // 关掉「锁屏播放状态」时就让会话失活：SystemUI 不再渲染锁屏媒体卡片，
+            // 但通知栏（如果仍开启）照常工作，两者互不牵连。
+            isActive = lockscreenControl
         }
 
         focus = AudioFocusHelper(this, focusCallback)
@@ -274,6 +293,39 @@ class PlaybackService : Service() {
 
     private fun command(action: String) = LeonBridge.sendCommand(action)
 
+    private fun readMediaPrefs() {
+        val prefs = getSharedPreferences(LeonBridge.PREFS_MEDIA, Context.MODE_PRIVATE)
+        notificationControl = prefs.getBoolean(LeonBridge.KEY_NOTIFICATION, true)
+        lockscreenControl = prefs.getBoolean(LeonBridge.KEY_LOCKSCREEN, true)
+    }
+
+    /** 设置页切换开关后由 [LeonBridge] 调用：立即重画通知并更新锁屏会话可见性。 */
+    fun onMediaPrefsChanged() {
+        main.post {
+            readMediaPrefs()
+            session.isActive = lockscreenControl
+            pushState()
+            notifyNow()
+        }
+    }
+
+    /**
+     * 媒体键广播目标。`MediaButtonReceiver` 会把 ACTION_MEDIA_BUTTON 转成
+     * MediaSession 的 callback（onPlay / onSkipToNext …），蓝牙耳机与有线线控
+     * 因此在 WebView 已被回收时仍然可用。
+     */
+    private fun mediaButtonIntent(): PendingIntent {
+        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            component = ComponentName(this@PlaybackService, MediaButtonReceiver::class.java)
+        }
+        return PendingIntent.getBroadcast(
+            this,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     /**
      * 组装 MediaSession 元数据。
      *
@@ -421,27 +473,38 @@ class PlaybackService : Service() {
         val toggleLabel = if (playing) "暂停" else "播放"
         val subtitle = if (album.isBlank()) artist else "$artist · $album"
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_leonmusic)
             .setContentTitle(title)
             .setContentText(subtitle)
-            .setLargeIcon(coverBitmap)
             .setContentIntent(openIntent())
             .setDeleteIntent(serviceIntent(ACTION_STOP))
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // 关掉「锁屏播放状态」时降成 PRIVATE：锁屏不再暴露曲目与控制，
+            // 通知栏（若仍开启）不受影响。
+            .setVisibility(
+                if (lockscreenControl) NotificationCompat.VISIBILITY_PUBLIC
+                else NotificationCompat.VISIBILITY_PRIVATE
+            )
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setSilent(true)
-            .addAction(R.drawable.ic_notif_prev, "上一首", serviceIntent(ACTION_PREV))
-            .addAction(toggleIcon, toggleLabel, serviceIntent(ACTION_TOGGLE))
-            .addAction(R.drawable.ic_notif_next, "下一首", serviceIntent(ACTION_NEXT))
-            .setStyle(
-                MediaNotificationCompat.MediaStyle()
-                    .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
-            )
-            .build()
+
+        // 关掉「通知栏播放控制」时退化成一条纯文本前台通知：
+        // Android 要求前台服务必须挂通知，不能整个撤掉，但可以不放封面与按钮。
+        if (notificationControl) {
+            builder
+                .setLargeIcon(coverBitmap)
+                .addAction(R.drawable.ic_notif_prev, "上一首", serviceIntent(ACTION_PREV))
+                .addAction(toggleIcon, toggleLabel, serviceIntent(ACTION_TOGGLE))
+                .addAction(R.drawable.ic_notif_next, "下一首", serviceIntent(ACTION_NEXT))
+                .setStyle(
+                    MediaNotificationCompat.MediaStyle()
+                        .setMediaSession(session.sessionToken)
+                        .setShowActionsInCompactView(0, 1, 2)
+                )
+        }
+        return builder.build()
     }
 
     private fun notifyNow() {

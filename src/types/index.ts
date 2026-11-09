@@ -293,6 +293,8 @@ export interface Settings {
   streamEnabled: boolean;
   /** 智能音质：播放失败时自动降一级音质重试，默认开启 */
   smartQuality: boolean;
+  /** 记住搜索平台：重启后恢复上次选中的搜索音源，默认开启 */
+  rememberSearchSource: boolean;
   cacheLimitMb: number;
   crossfadeMs: number;
 }
@@ -306,6 +308,15 @@ export interface PlatformInfo {
   supportsGlobalShortcut: boolean;
   supportsMediaSession: boolean;
   cacheDir: string;
+}
+
+/** Android 通知栏 / 锁屏媒体控制的实时状态（桌面端全 false）。 */
+export interface MediaStatus {
+  notificationGranted: boolean;
+  sessionActive: boolean;
+  foreground: boolean;
+  notificationControl: boolean;
+  lockscreenControl: boolean;
 }
 
 export interface ScanSummary {

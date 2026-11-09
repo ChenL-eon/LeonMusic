@@ -17,6 +17,7 @@ import type {
   LikeCheck,
   LikeResult,
   Lyrics,
+  MediaStatus,
   PlatformInfo,
   PlayerSnapshot,
   Playlist,
@@ -215,6 +216,13 @@ export const settings = {
   /** Android：状态栏/手势条图标跟随主题明暗（桌面空实现） */
   setDarkAppearance: (dark: boolean) =>
     invoke<void>("app_set_dark_appearance", { dark }),
+  /** Android：通知权限 / MediaSession / 前台服务 / 两个开关的实时状态 */
+  mediaStatus: () => invoke<MediaStatus>("app_media_status"),
+  /** Android：切换「通知栏播放控制」与「锁屏播放状态」 */
+  setMediaOptions: (notification: boolean, lockscreen: boolean) =>
+    invoke<void>("app_set_media_options", { notification, lockscreen }),
+  /** Android：跳到系统的应用通知设置页（权限被拒后自救） */
+  openNotificationSettings: () => invoke<void>("app_open_notification_settings"),
   dataDir: () => invoke<string>("app_data_dir"),
 };
 

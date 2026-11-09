@@ -6,7 +6,7 @@ use crate::audio::engine::EngineCommand;
 use crate::db::Settings;
 use crate::error::AppResult;
 use crate::events::EVT_SETTINGS_CHANGED;
-use crate::models::PlatformInfo;
+use crate::models::{MediaStatus, PlatformInfo};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -88,4 +88,32 @@ pub fn app_data_dir(app: AppHandle) -> String {
     crate::paths::data_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+// ---- Android 通知栏 / 锁屏媒体控制（桌面端走 PlatformHost 的默认空实现）----
+
+/// 设置页展示的实时状态：通知权限、MediaSession、前台服务、两个开关。
+#[tauri::command]
+pub fn app_media_status(app: AppHandle) -> MediaStatus {
+    app.state::<AppState>().platform.media_status()
+}
+
+/// 用户在设置页切换「通知栏播放控制」/「锁屏播放状态」。
+#[tauri::command]
+pub fn app_set_media_options(
+    app: AppHandle,
+    notification: bool,
+    lockscreen: bool,
+) -> AppResult<()> {
+    app.state::<AppState>()
+        .platform
+        .set_media_options(notification, lockscreen);
+    Ok(())
+}
+
+/// 用户拒绝过 POST_NOTIFICATIONS 后，从这里跳系统通知设置自行开启。
+#[tauri::command]
+pub fn app_open_notification_settings(app: AppHandle) -> AppResult<()> {
+    app.state::<AppState>().platform.open_notification_settings();
+    Ok(())
 }

@@ -13,7 +13,7 @@ use tauri::AppHandle;
 
 use crate::audio::engine::EngineCommand;
 use crate::error::AppResult;
-use crate::models::{PlatformInfo, PlayerSnapshot};
+use crate::models::{MediaStatus, PlatformInfo, PlayerSnapshot};
 
 // 每个平台的实现都**只在对应目标上编译**。
 // 这一点很关键：Windows 模块里全是 HWND / SMTC / 托盘 API，
@@ -64,6 +64,19 @@ pub trait PlatformHost: Send + Sync {
     /// Android 侧转成 `LeonBridge.dispatch("theme")` 交给系统栏控制器；
     /// 桌面端状态栏由窗口装饰处理，这里是空实现。
     fn set_dark_appearance(&self, dark: bool) -> AppResult<()>;
+
+    // ---- Android 通知栏 / 锁屏媒体控制（桌面端用默认空实现）----
+
+    /// 读一次原生侧的实时状态，供设置页显示权限与开关是否生效。
+    fn media_status(&self) -> MediaStatus {
+        MediaStatus::default()
+    }
+
+    /// 下发「通知栏播放控制 / 锁屏播放状态」两个开关。
+    fn set_media_options(&self, _notification: bool, _lockscreen: bool) {}
+
+    /// 打开系统的应用通知设置页（用户拒绝过权限时的自救入口）。
+    fn open_notification_settings(&self) {}
 }
 
 pub fn create() -> Arc<dyn PlatformHost> {

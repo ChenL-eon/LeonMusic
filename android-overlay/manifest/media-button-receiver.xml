@@ -1,0 +1,15 @@
+<!--
+  媒体键接收器：蓝牙耳机 / 有线线控 / 部分车机在 MediaSession 未直接投递时
+  走 ACTION_MEDIA_BUTTON 广播。androidx.media.session.MediaButtonReceiver 会把
+  事件转成 MediaSessionCompat.Callback（PlaybackService.sessionCallback）。
+
+  Android 12 起带 intent-filter 的组件必须显式声明 exported；系统需要向它发广播，
+  所以这里是 true。它只把事件交给本应用的 MediaSession，不接收外部数据。
+-->
+<receiver
+    android:name="androidx.media.session.MediaButtonReceiver"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+    </intent-filter>
+</receiver>

@@ -32,7 +32,7 @@ use tauri::AppHandle;
 
 use crate::audio::engine::EngineCommand;
 use crate::error::{AppError, AppResult};
-use crate::models::{PlatformInfo, PlatformKind, PlaybackStatus, PlayerSnapshot};
+use crate::models::{MediaStatus, PlatformInfo, PlatformKind, PlaybackStatus, PlayerSnapshot};
 
 use super::PlatformHost;
 
@@ -150,6 +150,23 @@ impl PlatformHost for AndroidPlatform {
         let json = format!("{{\"dark\":{dark}}}");
         bridge::call("theme", &json);
         Ok(())
+    }
+
+    fn media_status(&self) -> MediaStatus {
+        bridge::query("media")
+            .and_then(|raw| serde_json::from_str::<MediaStatus>(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn set_media_options(&self, notification: bool, lockscreen: bool) {
+        let json = format!(
+            "{{\"notification\":{notification},\"lockscreen\":{lockscreen}}}"
+        );
+        bridge::call("mediaPrefs", &json);
+    }
+
+    fn open_notification_settings(&self) {
+        bridge::call("notificationSettings", "{}");
     }
 }
 
