@@ -9,6 +9,13 @@
 #   LEONMUSIC_STORE_PASS —— jks storePassword
 #   LEONMUSIC_KEY_ALIAS  —— jks keyAlias
 #   LEONMUSIC_KEY_PASS   —— jks keyPassword
+#   GITEE_TOKEN          —— Gitee 私人令牌（权限勾选 projects），用于同步发行版
+#
+# Gitee 同步用仓库变量（Settings → Variables，不是 Secrets）：
+#   GITEE_OWNER  —— Gitee 用户名，如 chenl-eon
+#   GITEE_REPO   —— 下载仓库名，如 LeonMusic-releases
+#   GITEE_TARGET —— 可选，覆盖自动探测的默认分支（一般不用配）
+#   没配 GITEE_REPO 时整个 gitee 任务会被跳过，不影响 GitHub 发布。
 #
 # 安卓工程说明：src-tauri/gen/android/ 是生成物（.gitignore 排除），CI 里
 # 用 `tauri android init` + `android-overlay/apply.py` 重建，签名文件在跑
@@ -156,3 +163,43 @@ jobs:
           fail_on_unmatched_files: true
           # tag 名含 "-"（如 v1.0.2-beta）自动标记为预发布版
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # ------------------------------------------------------------ 同步 Gitee
+  # 独立下载仓库：只放发行版附件，不含源码。逻辑在 scripts/gitee_release.mjs，
+  # 与本地手动补传共用一份，避免两套实现漂移。
+  # 注意：下载仓库必须至少有一个初始提交（建仓时勾选「使用 Readme 初始化」），
+  # 否则 Gitee 无法按 target_commitish 创建 tag，发行版会建不出来。
+  gitee:
+    name: 同步到 Gitee 发行版
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && vars.GITEE_REPO != ''
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_OWNER: ${{ vars.GITEE_OWNER }}
+      GITEE_REPO: ${{ vars.GITEE_REPO }}
+      GITEE_TARGET: ${{ vars.GITEE_TARGET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-rel
+          merge-multiple: true
+
+      - name: 上传到 Gitee
+        if: env.GITEE_TOKEN != ''
+        shell: bash
+        run: |
+          FLAGS=()
+          case "$GITHUB_REF_NAME" in *-*) FLAGS+=(--prerelease) ;; esac
+          # 不传 --target 时由脚本读仓库默认分支，省得 master/main 猜错
+          if [ -n "$GITEE_TARGET" ]; then FLAGS+=(--target "$GITEE_TARGET"); fi
+          node scripts/gitee_release.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --dir dist-rel \
+            "${FLAGS[@]}"
+
+      - name: 未配置令牌，已跳过
+        if: env.GITEE_TOKEN == ''
+        run: echo "::notice::GITEE_REPO 已配置但缺少 GITEE_TOKEN，跳过 Gitee 同步"
