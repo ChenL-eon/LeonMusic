@@ -1107,6 +1107,28 @@ function goDownload() {
 
         <!-- 插件 -->
         <section v-else-if="tab === 'source'" class="group">
+          <!-- 记住搜索平台：只管「选过的音源要不要跨重启保留」，
+               音源值本身存 localStorage，开关进 Rust 设置库以便跨窗口同步 -->
+          <div class="row">
+            <div class="label with-icon">
+              <span class="row-icon"><Icon name="search" :size="19" /></span>
+              <div>
+                <div>记住搜索平台</div>
+                <div class="desc">
+                  重启后继续使用上次选的搜索音源；关闭后每次启动回到网易云音乐
+                </div>
+              </div>
+            </div>
+            <label class="switch">
+              <input
+                type="checkbox"
+                :checked="s.rememberSearchSource"
+                @change="set('rememberSearchSource', ($event.target as HTMLInputElement).checked)"
+              />
+              <span />
+            </label>
+          </div>
+
           <div class="account-link card">
             <Icon name="user" :size="18" />
             <div class="link-text">

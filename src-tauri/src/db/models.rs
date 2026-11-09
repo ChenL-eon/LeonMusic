@@ -730,6 +730,10 @@ pub struct Settings {
     pub stream_enabled: bool,
     /// 智能音质：在线曲目开播 / 解析失败时自动降一档音质重试，默认开启。
     pub smart_quality: bool,
+    /// 记住搜索平台：开启时把上次选中的搜索音源存到前端 localStorage，
+    /// 重启后恢复；关闭则每次启动回落到默认音源（网易云）。
+    /// 只控制「是否记住」，音源值本身是纯 UI 偏好，不进设置库。
+    pub remember_search_source: bool,
     pub cache_limit_mb: u64,
     pub crossfade_ms: u32,
 }
@@ -763,6 +767,7 @@ impl Default for Settings {
             dl_always_on_top: true,
             stream_enabled: false,
             smart_quality: true,
+            remember_search_source: true,
             cache_limit_mb: 2048,
             crossfade_ms: 0,
         }
@@ -871,5 +876,25 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remember_search_source_defaults_to_on_for_existing_installs() {
+        // 老版本保存的 JSON 里没有这个键；结构体级 #[serde(default)] 必须
+        // 从 Default 取值，不能反序列化成 false，否则升级后「记住」凭空关闭。
+        assert!(Settings::default().remember_search_source);
+        let legacy = serde_json::json!({
+            "theme": "dark",
+            "accent": "#7c5cff",
+            "smartQuality": false,
+            "cacheLimitMb": 1024
+        });
+        let s: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(s.remember_search_source, "旧存档按默认开启处理");
+        assert!(!s.smart_quality, "已有字段不被默认值覆盖");
+        assert_eq!(s.cache_limit_mb, 1024);
+        // 回写时新字段要出现在 JSON 里，前端才能读到
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["rememberSearchSource"], true);
     }
 }

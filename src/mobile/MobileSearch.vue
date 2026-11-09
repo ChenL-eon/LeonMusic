@@ -21,7 +21,8 @@ const settingsStore = useSettingsStore();
 const ui = useUiStore();
 
 const keyword = ref(props.initialKeyword ?? "");
-const activePlugin = ref("");
+/** 与桌面首页 / 桌面搜索页共享同一份音源状态，并受「记住搜索平台」控制 */
+const activePlugin = computed(() => settingsStore.searchSource);
 const results = ref<Track[]>([]);
 const loading = ref(false);
 const page = ref(1);
@@ -58,11 +59,13 @@ const missing = computed(() => {
 
 onMounted(async () => {
   await settingsStore.init();
-  if (!activePlugin.value && enabledPlugins.value.length) {
-    activePlugin.value = enabledPlugins.value[0].manifest.id;
-  }
+  settingsStore.initSearchSource(enabledPlugins.value.map((p) => p.manifest.id));
   inputEl.value?.focus();
 });
+
+function onSourceChange(id: string) {
+  settingsStore.selectSearchSource(id);
+}
 
 async function search(reset = true) {
   const q = keyword.value.trim();
@@ -148,7 +151,7 @@ function clear() {
         :key="p.manifest.id"
         class="m-chip"
         :class="{ on: activePlugin === p.manifest.id }"
-        @click="activePlugin = p.manifest.id"
+        @click="onSourceChange(p.manifest.id)"
       >
         {{ p.manifest.name.replace(/音乐|（.*）|\(.*\)/g, "").trim() || p.manifest.name }}
       </button>

@@ -37,6 +37,7 @@ const DEFAULTS: Settings = {
   dlAlwaysOnTop: true,
   streamEnabled: false,
   smartQuality: true,
+  rememberSearchSource: true,
   cacheLimitMb: 2048,
   crossfadeMs: 0,
 };
@@ -44,6 +45,28 @@ const DEFAULTS: Settings = {
 /** 自建流媒体服务的插件 id：由设置页「流媒体」总开关统一启停。
  *  设置页按这一组 id 过滤渲染，不散落在各处写字符串。 */
 export const STREAM_PLUGIN_IDS = ["emby", "jellyfin", "navidrome"] as const;
+
+/** 搜索音源值沿用 1.1.1 已写入的 key：升级后用户原先选的 QQ 音乐不会丢。
+ *  现在它不再只属于首页 —— 桌面首页 / 桌面搜索页 / 移动搜索页共用一份。 */
+const SEARCH_SOURCE_KEY = "leonmusic.home.searchSource";
+const DEFAULT_SEARCH_SOURCE = "netease";
+
+function readSavedSource(): string | null {
+  try {
+    return localStorage.getItem(SEARCH_SOURCE_KEY);
+  } catch {
+    return null; // 隐私模式 / 禁用存储
+  }
+}
+
+function writeSavedSource(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(SEARCH_SOURCE_KEY, id);
+    else localStorage.removeItem(SEARCH_SOURCE_KEY);
+  } catch {
+    /* 存储不可用时只在本次会话内生效 */
+  }
+}
 
 export const useSettingsStore = defineStore("settings", () => {
   const value = ref<Settings>({ ...DEFAULTS });
@@ -54,6 +77,52 @@ export const useSettingsStore = defineStore("settings", () => {
 
   const isAndroid = computed(() => platform.value?.kind === "android");
   const supportsLyricWindow = computed(() => platform.value?.supportsLyricWindow ?? false);
+
+  // ---------------------------------------------------------------------------
+  // 搜索音源：全软件共享的当前值 + 「记住搜索平台」开关
+  //
+  // 以前只有首页内联搜索把选择记在 localStorage，独立的桌面/移动搜索页各自
+  // 从插件列表第一项起步，三个入口互不相认。这里把当前值收进 store：
+  // 一处切换，三个页面同步；是否落盘由 Settings.rememberSearchSource 决定。
+  // 音源值本身是纯 UI 偏好（localStorage 足够），开关才进 Rust 设置库，
+  // 这样才能跨窗口广播、两端共用同一份配置。
+  // ---------------------------------------------------------------------------
+
+  const searchSource = ref<string>(DEFAULT_SEARCH_SOURCE);
+  let searchSourceReady = false;
+
+  /** 设置页随时可能关掉「记住」，跨窗口 settings_changed 也走这条路径。
+   *  关掉时立刻抹掉历史值；重新打开时把当前会话的选择再记上。 */
+  watch(
+    () => value.value.rememberSearchSource,
+    (remember) => {
+      if (!searchSourceReady) return;
+      writeSavedSource(remember ? searchSource.value : null);
+    },
+  );
+
+  /** 各搜索页 mount 后调用：第一次决定初值，之后只做有效性兜底
+   *  （插件停用 / 卸载后，记住的 id 不存在就回落到默认音源）。 */
+  function initSearchSource(availableIds: string[]): string {
+    const fallback = availableIds.includes(DEFAULT_SEARCH_SOURCE)
+      ? DEFAULT_SEARCH_SOURCE
+      : (availableIds[0] ?? DEFAULT_SEARCH_SOURCE);
+    const remember = value.value.rememberSearchSource;
+    if (!searchSourceReady) {
+      const saved = remember ? readSavedSource() : null;
+      searchSource.value = saved && availableIds.includes(saved) ? saved : fallback;
+      searchSourceReady = true;
+    } else if (!availableIds.includes(searchSource.value)) {
+      searchSource.value = fallback;
+    }
+    if (!remember) writeSavedSource(null);
+    return searchSource.value;
+  }
+
+  function selectSearchSource(id: string): void {
+    searchSource.value = id;
+    writeSavedSource(value.value.rememberSearchSource ? id : null);
+  }
 
   /** 上次同步给系统栏的明暗，避免每次 watch 触发都发一次 IPC */
   let lastDarkAppearance: boolean | null = null;
@@ -184,6 +253,9 @@ export const useSettingsStore = defineStore("settings", () => {
     loaded,
     isAndroid,
     supportsLyricWindow,
+    searchSource,
+    initSearchSource,
+    selectSearchSource,
     init,
     save,
     reloadPlugins,

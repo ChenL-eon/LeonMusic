@@ -4,6 +4,7 @@
 import { computed, onMounted, ref } from "vue";
 
 import Icon from "@/components/Icon.vue";
+import SourceSelect from "@/components/SourceSelect.vue";
 import TrackList from "@/components/TrackList.vue";
 import { plugins as pluginApi } from "@/api/ipc";
 import { errorText } from "@/api/ipc";
@@ -19,7 +20,8 @@ const settingsStore = useSettingsStore();
 const ui = useUiStore();
 
 const keyword = ref("");
-const activePlugin = ref("");
+/** 当前音源与首页 / 移动搜索页共享同一份 store 状态，切换处处同步。 */
+const activePlugin = computed(() => settingsStore.searchSource);
 const results = ref<Track[]>([]);
 const loading = ref(false);
 const page = ref(1);
@@ -37,6 +39,10 @@ const enabledPlugins = computed(() =>
         Number(b.manifest.id === "netease") - Number(a.manifest.id === "netease") ||
         a.manifest.name.localeCompare(b.manifest.name),
     ),
+);
+
+const sourceOptions = computed(() =>
+  enabledPlugins.value.map((p) => ({ id: p.manifest.id, name: p.manifest.name })),
 );
 
 function isConfigured(p: PluginInfo): boolean {
@@ -67,10 +73,12 @@ const missing = computed(() => {
 
 onMounted(async () => {
   await settingsStore.init();
-  if (!activePlugin.value && enabledPlugins.value.length) {
-    activePlugin.value = enabledPlugins.value[0].manifest.id;
-  }
+  settingsStore.initSearchSource(enabledPlugins.value.map((p) => p.manifest.id));
 });
+
+function onSourceChange(id: string) {
+  settingsStore.selectSearchSource(id);
+}
 
 async function search(reset = true) {
   const q = keyword.value.trim();
@@ -134,12 +142,13 @@ async function fav(t: Track) {
     </header>
 
     <div class="bar">
-      <select v-model="activePlugin" class="select">
-        <option v-for="p in enabledPlugins" :key="p.manifest.id" :value="p.manifest.id">
-          {{ p.manifest.name }}
-        </option>
-        <option v-if="!enabledPlugins.length" value="">未启用插件</option>
-      </select>
+      <SourceSelect
+        class="bar-source"
+        :model-value="activePlugin"
+        :options="sourceOptions"
+        placeholder="未启用音源"
+        @change="onSourceChange"
+      />
       <div class="search">
         <Icon name="search" :size="17" />
         <input
@@ -206,16 +215,7 @@ async function fav(t: Track) {
   padding: 8px 0 14px;
   flex-wrap: wrap;
 }
-.select {
-  height: 40px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text-2);
-  padding: 0 14px;
-  font-size: 12.5px;
-  outline: none;
-}
+/* 音源选择器样式在 components/SourceSelect.vue；这里只处理窄屏排版 */
 .search {
   flex: 1;
   min-width: 200px;
@@ -299,10 +299,14 @@ async function fav(t: Track) {
     min-width: 0;
     height: 46px;
   }
-  .select {
+  .bar-source {
     order: 2;
     flex: 1 1 0;
     min-width: 0;
+  }
+  .bar-source :deep(.ss-trigger) {
+    width: 100%;
+    max-width: none;
     height: 44px;
   }
   .bar .btn {
@@ -339,8 +343,12 @@ async function fav(t: Track) {
     min-width: 0;
     height: 40px;
   }
-  .select {
+  .bar-source {
     flex: 0 0 150px;
+  }
+  .bar-source :deep(.ss-trigger) {
+    width: 100%;
+    max-width: none;
     height: 40px;
   }
   .bar .btn {
