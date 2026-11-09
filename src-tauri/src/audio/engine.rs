@@ -658,15 +658,11 @@ impl Session {
     }
 
     fn set_paused(&mut self, paused: bool, output: &AudioPipeline) -> AppResult<()> {
-        if self.paused == paused {
-            return Ok(());
-        }
+        // 不能因为 `self.paused == paused` 就提前返回：切歌会新建一个
+        // paused=false 的 Session，而设备侧的 stream 可能还挂在上一次的暂停里。
+        // 此时点「播放」若直接跳过，设备永远不会恢复 —— 必须按设备真实状态对齐。
         self.paused = paused;
-        if paused {
-            output.output.suspend()
-        } else {
-            output.output.resume()
-        }
+        align_output(paused, output)
     }
 
     fn pump(&mut self, output: &mut AudioPipeline, shared: &SharedState) -> AppResult<()> {
@@ -791,8 +787,10 @@ fn run_engine(
             queue.set_items(saved.queue.items, saved.queue.current);
             queue.set_repeat(saved.queue.repeat);
             queue.set_shuffle(saved.queue.shuffle);
-            shared.repeat.store(saved.queue.repeat as u8, Ordering::Relaxed);
-            shared.shuffle.store(saved.queue.shuffle, Ordering::Relaxed);
+            // 旧存档可能存着 shuffle+One 这种非法组合，一律用归一化后的值回写
+            let (shuffle, repeat) = queue.mode();
+            shared.repeat.store(repeat as u8, Ordering::Relaxed);
+            shared.shuffle.store(shuffle, Ordering::Relaxed);
             *shared.queue.write() = queue.snapshot();
             shared.set_resume(track.id.clone(), saved.position_ms);
             shared
@@ -866,6 +864,27 @@ fn run_engine(
     drop(output);
     tracing::info!("audio engine loop exited");
     Ok(())
+}
+
+/// 让设备侧的播放状态与 Session 对齐，幂等。
+///
+/// 暂停会 `suspend()` 输出流；但切歌是新建一个 `paused=false` 的 Session，
+/// 不会自动把挂起的 stream 拉回来。后果是：解码照常把前两秒数据填满 ring，
+/// 状态是 Playing、前端进度条靠墙钟插值继续走，设备却一个回调都不跑 ——
+/// 「有进度没声音」。用户先暂停再播放恰好触发 `resume()` 才出声，而且是从
+/// ring 里堆积的开头数据开始，听起来像从头重播。
+///
+/// 所以开播前和每次暂停/恢复都要按 `is_suspended()` 核对一次，
+/// 而不是依赖 Session 自己的布尔值。
+fn align_output(paused: bool, out: &AudioPipeline) -> AppResult<()> {
+    let suspended = out.output.is_suspended();
+    if paused && !suspended {
+        out.output.suspend()
+    } else if !paused && suspended {
+        out.output.resume()
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_output<'a>(
@@ -980,6 +999,15 @@ fn start_track(
 
     match Session::open(&track) {
         Ok(mut s) => {
+            // 新会话一定是非暂停态：上一次暂停挂起的设备必须在这里恢复，
+            // 否则就是「进度条在走但没声音」。失败要显式报错，别假装开播成功。
+            if let Err(e) = align_output(false, output) {
+                tracing::error!("resume audio output on track start failed: {e}");
+                *shared.error.write() = Some(format!("无法恢复音频输出：{e}"));
+                shared.set_status(PlaybackStatus::Error);
+                platform.update_playback_state(false);
+                return false;
+            }
             // 切歌：清掉上一首残留在 ring 里的样本
             output.shared.reset_transport();
             // 没有显式起点时，消费「上次播放进度」的记忆（仅启动恢复那首有效）
@@ -1164,12 +1192,19 @@ fn handle_command(
         EngineCommand::SetGain(v) => shared.set_gain(v),
         EngineCommand::SetRepeat(mode) => {
             queue.set_repeat(mode);
-            shared.repeat.store(mode as u8, Ordering::Relaxed);
+            // 归一化可能顺带关掉 shuffle，两个 atomic 都必须跟着 queue 走，
+            // 否则前端仍显示「单曲循环」而引擎已经在随机播放。
+            let (shuffle, repeat) = queue.mode();
+            shared.repeat.store(repeat as u8, Ordering::Relaxed);
+            shared.shuffle.store(shuffle, Ordering::Relaxed);
             broadcast_queue(queue, shared, app);
         }
         EngineCommand::SetShuffle(on) => {
             queue.set_shuffle(on);
-            shared.shuffle.store(on, Ordering::Relaxed);
+            // 归一化可能顺带把 repeat=One 复位为 Off
+            let (shuffle, repeat) = queue.mode();
+            shared.repeat.store(repeat as u8, Ordering::Relaxed);
+            shared.shuffle.store(shuffle, Ordering::Relaxed);
             broadcast_queue(queue, shared, app);
         }
         EngineCommand::Duck(on) => {
@@ -1326,5 +1361,79 @@ mod tests {
         let mut pending = Vec::new();
         push_or_park(&mut producer, &[1.0, 2.0, 3.0], &mut pending);
         assert!(pending.is_empty());
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering as MemOrdering};
+
+    struct FakeOutput {
+        suspended: AtomicBool,
+        suspend_calls: Arc<AtomicUsize>,
+        resume_calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::audio::sink::AudioOutput for FakeOutput {
+        fn suspend(&self) -> AppResult<()> {
+            self.suspended.store(true, MemOrdering::SeqCst);
+            self.suspend_calls.fetch_add(1, MemOrdering::SeqCst);
+            Ok(())
+        }
+        fn resume(&self) -> AppResult<()> {
+            self.suspended.store(false, MemOrdering::SeqCst);
+            self.resume_calls.fetch_add(1, MemOrdering::SeqCst);
+            Ok(())
+        }
+        fn is_suspended(&self) -> bool {
+            self.suspended.load(MemOrdering::SeqCst)
+        }
+    }
+
+    fn fake_pipeline(suspended: bool) -> (AudioPipeline, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (producer, _consumer) = rtrb::RingBuffer::<f32>::new(64);
+        let suspend_calls = Arc::new(AtomicUsize::new(0));
+        let resume_calls = Arc::new(AtomicUsize::new(0));
+        let pipeline = AudioPipeline {
+            output: Box::new(FakeOutput {
+                suspended: AtomicBool::new(suspended),
+                suspend_calls: suspend_calls.clone(),
+                resume_calls: resume_calls.clone(),
+            }),
+            config: crate::audio::sink::OutputConfig {
+                sample_rate: 48_000,
+                channels: 2,
+            },
+            producer,
+            shared: Arc::new(crate::audio::sink::OutputShared::new(0.85)),
+            capacity: 64,
+            device_name: "fake".into(),
+        };
+        (pipeline, suspend_calls, resume_calls)
+    }
+
+    /// 回归「有进度没声音」：上一首暂停挂起了设备，切歌后新 Session 是
+    /// paused=false，开播 / 直接点播放都必须把设备拉回运行态，且不能重复动 stream。
+    #[test]
+    fn align_output_wakes_suspended_device() {
+        let (p, suspends, resumes) = fake_pipeline(true);
+        align_output(false, &p).unwrap();
+        assert_eq!(resumes.load(MemOrdering::SeqCst), 1);
+        assert_eq!(suspends.load(MemOrdering::SeqCst), 0);
+        assert!(!p.output.is_suspended());
+        // 幂等：设备已在跑，再调一次不该重复 play()
+        align_output(false, &p).unwrap();
+        assert_eq!(resumes.load(MemOrdering::SeqCst), 1);
+    }
+
+    /// 正常暂停 → 播放：只在状态真的变化时才碰设备，避免每 8ms 反复 pause/play。
+    #[test]
+    fn align_output_pause_resume_is_idempotent() {
+        let (p, suspends, resumes) = fake_pipeline(false);
+        align_output(false, &p).unwrap();
+        assert_eq!(suspends.load(MemOrdering::SeqCst), 0);
+        assert_eq!(resumes.load(MemOrdering::SeqCst), 0);
+        align_output(true, &p).unwrap();
+        align_output(true, &p).unwrap();
+        assert_eq!(suspends.load(MemOrdering::SeqCst), 1);
+        align_output(false, &p).unwrap();
+        assert_eq!(resumes.load(MemOrdering::SeqCst), 1);
     }
 }

@@ -141,11 +141,29 @@ impl PlayQueue {
         self.restore_cursor_by_track(current_track);
     }
 
+    /// 当前生效的模式。UI 把 shuffle + repeat 组合成四种互斥模式，但两个
+    /// IPC 是分开的：任何入口只改其中一个，都可能留下 `shuffle=true,
+    /// repeat=One`（图标显示随机、实际却在单曲循环）这种非法组合。
+    /// 归一化统一在这里做，调用方用本方法的结果回写 `SharedState`。
+    pub fn mode(&self) -> (bool, RepeatMode) {
+        (self.shuffle, self.repeat)
+    }
+
     pub fn set_repeat(&mut self, mode: RepeatMode) {
+        if mode == RepeatMode::One && self.shuffle {
+            // 单曲循环与随机互斥：进入单曲循环就退出随机，恢复原顺序。
+            self.shuffle = false;
+            self.rebuild_order();
+        }
         self.repeat = mode;
     }
 
     pub fn set_shuffle(&mut self, on: bool) {
+        if on && self.repeat == RepeatMode::One {
+            // 切到随机时必须退出单曲循环，否则自动续播会一直重播当前曲目，
+            // 而手动「下一首」却按随机序前进——两个入口表现对不上。
+            self.repeat = RepeatMode::Off;
+        }
         if self.shuffle == on {
             return;
         }
@@ -161,7 +179,9 @@ impl PlayQueue {
         if self.order.is_empty() {
             return None;
         }
-        if auto && self.repeat == RepeatMode::One {
+        // 防御：旧存档或外部直接写字段仍可能造出 shuffle+One 的组合，
+        // 此时按随机序前进而不是重播当前曲目。
+        if auto && self.repeat == RepeatMode::One && !self.shuffle {
             return self.current_index();
         }
         let c = self.cursor?;
@@ -306,5 +326,50 @@ mod tests {
         q.set_items(vec![track("a"), track("b")], Some(1));
         q.push(vec![track("c")], false);
         assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+    }
+
+    /// 回归：移动端从「单曲循环」切到「随机」时只发了 setShuffle(true)，
+    /// repeat 仍是 One，于是自动续播重播当前曲目、手动下一首才随机。
+    #[test]
+    fn shuffle_clears_repeat_one_and_auto_next_advances() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a"), track("b"), track("c")], Some(0));
+        q.set_repeat(RepeatMode::One);
+        assert_eq!(q.next(true), Some(0), "单曲循环应重播当前曲目");
+
+        q.set_shuffle(true);
+        let (shuffle, repeat) = q.mode();
+        assert!(shuffle);
+        assert_eq!(repeat, RepeatMode::Off, "随机模式必须退出单曲循环");
+
+        let before = q.current_index();
+        let after = q.next(true);
+        assert!(after.is_some());
+        assert_ne!(after, before, "随机模式下自动续播必须前进");
+    }
+
+    #[test]
+    fn repeat_one_exits_shuffle_and_keeps_current_track() {
+        let mut q = PlayQueue::default();
+        q.set_shuffle(true);
+        q.set_items(vec![track("a"), track("b"), track("c")], Some(1));
+        q.set_repeat(RepeatMode::One);
+        let (shuffle, repeat) = q.mode();
+        assert!(!shuffle);
+        assert_eq!(repeat, RepeatMode::One);
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+        assert_eq!(q.next(true), Some(1));
+    }
+
+    #[test]
+    fn stale_shuffle_plus_repeat_one_does_not_loop() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a"), track("b")], Some(0));
+        // 模拟旧存档 / 外部直接写字段留下的非法组合
+        q.shuffle = true;
+        q.repeat = RepeatMode::One;
+        q.rebuild_order();
+        let before = q.current_index();
+        assert_ne!(q.next(true), before, "非法组合也不能退化成单曲循环");
     }
 }

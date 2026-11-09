@@ -33,8 +33,8 @@ pub trait AudioOutput {
     /// 暂停设备侧播放（省电，避免空转回调）。队列与进度保持不变。
     fn suspend(&self) -> AppResult<()>;
     fn resume(&self) -> AppResult<()>;
-    /// 给上层判断「设备是否已经挂起」，目前只有 Android 的生命周期回调会用。
-    #[allow(dead_code)]
+    /// 给上层判断「设备是否已经挂起」。切歌 / 恢复播放时按它对齐状态，
+    /// 否则会出现「状态在播、设备却没跑」的静音。
     fn is_suspended(&self) -> bool;
 }
 
