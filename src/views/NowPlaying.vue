@@ -279,7 +279,6 @@ function menuAction(fn: () => void) {
           :model-value="displayPosition"
           :max="Math.max(snap.durationMs, 1)"
           :step="100"
-          thin
           @change="onSeek"
         />
         <span class="time mono">{{ fmt(snap.durationMs) }}</span>
@@ -448,7 +447,7 @@ function menuAction(fn: () => void) {
   opacity: 0.72;
 }
 .now.has-bg .time {
-  color: rgba(255, 255, 255, 0.62);
+  color: rgba(255, 255, 255, 0.7);
 }
 .now.has-bg .icon-btn {
   color: rgba(255, 255, 255, 0.88);
@@ -478,8 +477,9 @@ function menuAction(fn: () => void) {
   max-width: 46%;
 }
 .corner-btn {
-  width: 36px;
-  height: 36px;
+  position: relative;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -487,6 +487,14 @@ function menuAction(fn: () => void) {
   background: color-mix(in srgb, var(--panel) 82%, transparent);
   border: 1px solid var(--border);
   backdrop-filter: blur(14px);
+}
+/* 视觉仍是 40px 圆，但用透明伪元素把命中区外扩到 48×48：
+   原来 36px 贴边经常点空，鼠标和触屏都不友好。 */
+.corner-btn::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
 }
 .corner-btn:hover {
   color: var(--text);
@@ -648,7 +656,9 @@ function menuAction(fn: () => void) {
   background: var(--hover);
 }
 
-/* 进度条：细滑块 + 淡色两端时间 */
+/* 进度条：全局细条（3px）在沉浸背景上几乎看不见。这里用 5px 轨道 +
+   半透明前景色（深浅主题自适应），并常驻一个小圆点提示可拖；
+   hover / 拖动时轨道再长粗、把手放大，命中区域仍是整行 18px。 */
 .progress-row {
   display: flex;
   align-items: center;
@@ -659,11 +669,45 @@ function menuAction(fn: () => void) {
 .progress {
   flex: 1;
 }
+.progress :deep(.track) {
+  height: 5px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  transition: height 0.16s var(--ease);
+}
+.progress :deep(.fill) {
+  background: var(--accent);
+}
+.progress :deep(.thumb) {
+  width: 11px;
+  height: 11px;
+  opacity: 0.85;
+  transform: translate(-50%, -50%) scale(0.6);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+.progress:hover :deep(.track),
+.progress.dragging :deep(.track) {
+  height: 6px;
+}
+.progress:hover :deep(.thumb),
+.progress.dragging :deep(.thumb) {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* 沉浸配色：品牌色在任意专辑底色上未必够亮，进度改白色、轨道用半透明白 */
+.now.has-bg .progress :deep(.track) {
+  background: rgba(255, 255, 255, 0.22);
+}
+.now.has-bg .progress :deep(.fill) {
+  background: #fff;
+}
+
 .time {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-3);
   min-width: 38px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 移动端专用控制行，桌面隐藏 */

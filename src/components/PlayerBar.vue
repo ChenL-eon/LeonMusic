@@ -606,7 +606,7 @@ button.pill:hover {
     left: 0;
     height: 3px;
     width: var(--p, 0%);
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    background: var(--accent);
     border-radius: 0 3px 3px 0;
     transition: width 0.2s linear;
     pointer-events: none;

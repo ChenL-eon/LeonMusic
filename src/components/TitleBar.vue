@@ -2,11 +2,19 @@
 /** 无框窗口的自绘标题栏（2026-11-07：与主页面融合，无系统分割线）。
  *  - 整条是拖拽区（data-tauri-drag-region，双击最大化由 Tauri 注入脚本处理）；
  *  - 背景全透明，右侧三个窗口控制按钮，hover 才出现底色；
- *  - fixed 悬浮在所有页面（含播放页覆盖层 z35、队列抽屉 z40）之上。 */
-import { onMounted, onUnmounted, ref } from "vue";
+ *  - fixed 悬浮在所有页面（含播放页覆盖层 z35、队列抽屉 z40）之上。
+ *
+ * 2026-11-09：根节点改 pointer-events:none，事件只由 .dragbar / .controls 接；
+ * 播放页打开时 .dragbar 左侧让出 64px，否则 z60 的标题带会把播放页左上角
+ * 「收起」按钮的上半截吞掉（点下去变成拖窗口）。 */
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import Icon from "@/components/Icon.vue";
+import { useUiStore } from "@/stores/ui";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+const ui = useUiStore();
+const overNow = computed(() => ui.page === "now");
 
 const appWindow = getCurrentWindow();
 const maximized = ref(false);
@@ -43,7 +51,8 @@ function close() {
 </script>
 
 <template>
-  <div class="titlebar" data-tauri-drag-region>
+  <div class="titlebar" :class="{ 'over-now': overNow }">
+    <div class="dragbar" data-tauri-drag-region />
     <div class="controls">
       <button class="tbtn" title="最小化" @click="minimize">
         <Icon name="win-min" :size="15" />
@@ -73,11 +82,13 @@ function close() {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  /* 根节点不接事件：样式照画，鼠标交给 .dragbar（拖拽）与 .controls（按钮），
+     这样播放页可以在标题带左上角挖一个洞把「收起」按钮露出来。 */
+  pointer-events: none;
   /* 柔和的背景延伸：无分割线，只是把页面渐变顶部略略压实，
      列表滚动时内容穿过标题带不至于生硬。
-     整条正常接收鼠标事件：Tauri 的 drag-region 注入脚本靠
-     mousedown 命中 data-tauri-drag-region 才启动拖拽，
-     页面内容已通过 padding-top 补偿到标题带之下，无遮挡冲突。 */
+     鼠标事件由下面的 .dragbar 单独承接（Tauri 的 drag-region 注入脚本
+     靠 mousedown 命中 data-tauri-drag-region 才启动拖拽）。 */
   background: linear-gradient(
     to bottom,
     color-mix(in srgb, var(--bg) 88%, transparent),
@@ -88,7 +99,21 @@ function close() {
   transition: background 0.25s ease;
 }
 
+/* 真正的拖拽命中层：整条标题带 */
+.dragbar {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: auto;
+}
+/* 播放页：左上角 64px（收起按钮 + 外扩命中区）留给页面，别在这里拖窗口 */
+.titlebar.over-now .dragbar {
+  left: 64px;
+}
+
 .controls {
+  position: relative;
+  z-index: 1;
   display: flex;
   height: 100%;
   pointer-events: auto;

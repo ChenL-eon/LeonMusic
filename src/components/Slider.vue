@@ -122,7 +122,9 @@ watch(
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  /* 纯色填充：进度/音量条不再用 accent → accent-2 渐变，
+     免得短进度段看起来偏色、也和沉浸式页面不搭 */
+  background: var(--accent);
 }
 .thumb {
   position: absolute;

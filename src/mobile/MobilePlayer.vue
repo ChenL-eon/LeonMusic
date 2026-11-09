@@ -243,19 +243,21 @@ function onTouchEnd(e: TouchEvent) {
   flex: none;
   min-height: 46px;
 }
-/* 收起箭头不带圆形底：参考图里它只是一个贴左的图标 */
+/* 收起箭头不带圆形底：参考图里它只是一个贴左的图标。
+   命中区放大到 44×44（拇指最小舒适尺寸），左边距同步 -3px 保持图标中心不动 */
 .arrow {
   position: absolute;
-  left: -8px;
+  left: -11px;
   top: 50%;
   transform: translateY(-50%);
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   color: #fff;
   background: transparent;
+  touch-action: manipulation;
 }
 .arrow:active {
   background: rgba(255, 255, 255, 0.14);
