@@ -395,10 +395,16 @@ fn preload_next(app: &AppHandle) {
         let mut t = next;
         match ensure_playable_ex(&app, &mut t, false).await {
             Ok(quality) => {
-                *crate::state::pre_resolved().lock() = Some(crate::state::PreResolved {
-                    track: t,
-                    quality,
-                });
+                // 只把达标的结果放进槽。低规格结果会挡住切歌时的重新解析，
+                // 让一次第三方超时变成「这一首以后都只有 320k」。
+                if quality.as_ref().is_some_and(|q| q.downgraded) {
+                    tracing::debug!("skip pre-resolved slot for downgraded stream: {}", t.id);
+                } else {
+                    *crate::state::pre_resolved().lock() = Some(crate::state::PreResolved {
+                        track: t,
+                        quality,
+                    });
+                }
             }
             Err(e) => {
                 tracing::debug!("preload next track failed (ignored): {e}");
@@ -419,6 +425,11 @@ async fn ensure_playable_ex(
         let st = app.state::<AppState>();
         (st.plugins.clone(), st.engine.clone())
     };
+
+    // 音质档位升级后，DB 里可能还钉着当年那份 320k 缓存的路径。不清掉的话
+    // 点播永远走「文件已存在」的快捷路，解析链根本没机会跑 —— 这就是
+    // 「选了无损却一直播 MP3」的来源之一。丢掉的路径留作兜底（见下面解析失败处）。
+    let stale_fallback = crate::state::drop_stale_lossy_cache(app, track);
 
     if let Some(p) = &track.file_path {
         if std::path::Path::new(p).exists() {
@@ -451,10 +462,14 @@ async fn ensure_playable_ex(
                 *slot = None;
             }
             None
-        } else if slot
-            .as_ref()
-            .is_some_and(|p| p.track.id == track.id && p.track.stream_url.is_some())
-        {
+        } else if slot.as_ref().is_some_and(|p| {
+            p.track.id == track.id
+                && p.track.stream_url.is_some()
+                // 槽里是「用户要无损、上轮只解析到 MP3」的结果时不命中：
+                // 让这一次重新解析一遍，第三方偶发超时才有机会自愈，
+                // 而不是把一次抖动钉成「这首永远 320k」。
+                && !p.quality.as_ref().is_some_and(|q| q.downgraded)
+        }) {
             slot.take()
         } else {
             None
@@ -477,7 +492,19 @@ async fn ensure_playable_ex(
         let _ = app.emit(crate::events::EVT_BUFFERING, serde_json::json!({ "trackId": track.id }));
     }
 
-    let stream = plugins.stream_url(&plugin_id, track).await?;
+    let stream = match plugins.stream_url(&plugin_id, track).await {
+        Ok(s) => s,
+        Err(e) => {
+            // 刚把旧的有损缓存摘掉了，解析又失败（离线 / 解析服务挂了）：
+            // 退回那份 MP3 还能听，总比「以前能听的歌现在直接报错」好。
+            if let Some(p) = stale_fallback.filter(|p| std::path::Path::new(p).exists()) {
+                tracing::info!("resolve failed ({e}), fall back to cached lossy file: {p}");
+                track.file_path = Some(p);
+                return Ok(None);
+            }
+            return Err(e);
+        }
+    };
 
     // 流式起播：直链立即交给引擎（Session 边下边播，不等整曲下载），
     // 下载线程落盘完成后回填 file_path（DB + 内存队列），重播秒开。

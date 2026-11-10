@@ -587,7 +587,6 @@ var GD_API = 'https://music-api.gdstudio.xyz/api.php';
 var kuwoDeviceId = '';
 var bodianUnlocked = false;
 var bodianCooldownUntil = 0;
-var gdCooldownUntil = 0;
 
 /** 设备号：BD 接口按 devid 记解锁位，同一次会话复用即可 */
 function kuwoDevice() {
@@ -790,28 +789,34 @@ function bodianResolve(track, br) {
   return { url: url, br: declared };
 }
 
-/** GD 音乐台：直接用网易 ID 换直链，限流时冷却 10 分钟 */
+/** GD 音乐台：直接用网易 ID 换直链。
+ *  每次宿主调用都会新建 JS 上下文（plugin/js_runtime.rs 的 Context::default），
+ *  模块级「冷却 10 分钟」跨调用根本不生效 —— 旧注释和实现都是错的。真正
+ *  常见的是偶发 503 / 超时：链尾一失败，官方 320k 就顶上来，用户看到
+ *  「这首没无损」。改成本次调用内最多问两次、超时放宽到 6s，一次抖动
+ *  不再决定整首歌的音质。 */
 function gdResolve(track, br) {
-  if (Date.now() < gdCooldownUntil) return null;
   var id = String(track.id || '');
   if (!/^\d+$/.test(id)) return null;
   var quality = Number(br) >= 900 ? '999' : '320';
   var url = GD_API + '?types=url&source=netease&id=' + id + '&br=' + quality;
-  var body = null;
-  try {
-    body = leon.http.get(url, { timeoutMs: 4000 });
-  } catch (e) {
-    body = null;
-  }
   var json = null;
-  try {
-    json = JSON.parse(body);
-  } catch (e) {
-    // 503 / 维护页 → 冷却，链尾后端不该反复拖慢首播
-    gdCooldownUntil = Date.now() + 10 * 60 * 1000;
-    return null;
+  for (var n = 0; n < 2 && !json; n++) {
+    var body = null;
+    try {
+      body = leon.http.get(url, { timeoutMs: 6000 });
+    } catch (e) {
+      body = null;
+    }
+    var parsed = null;
+    try {
+      parsed = JSON.parse(body);
+    } catch (e) {
+      parsed = null;
+    }
+    if (parsed && parsed.url && parsed.br) json = parsed;
   }
-  if (!json || !json.url || !json.br) return null;
+  if (!json) return null;
 
   var realBr = Number(json.br) || 0;
   var size = Number(json.size) || 0;
@@ -820,7 +825,10 @@ function gdResolve(track, br) {
     var seconds = (size * 8) / (realBr * 1000);
     if (seconds < (wantMs / 1000) * 0.5) return null; // 30 秒试听片段
   }
-  return { url: json.url, br: realBr >= 900 ? 900 : realBr };
+  // 归一化：GD 对 FLAC 报的是实测码率（《她》实测 855k），不是「无损」标记。
+  // 不按后缀抬到 900 的话，下游拿 900 当无损门槛会把它当 320k 档丢掉。
+  var isFlac = /\.flac$/i.test(String(json.url).split('?')[0]);
+  return { url: json.url, br: isFlac ? 900 : realBr >= 900 ? 900 : realBr };
 }
 
 // ---------------------------------------------------------------------------
@@ -956,9 +964,12 @@ function getStreamUrl(track) {
     if (resolved && resolved.url) {
       var fmt = formatFromUrl(resolved.url);
       var resolvedBr = Number(resolved.br) || 0;
-      // 官方已有合法全曲（只是不到无损）时，只有解析确实拿到 FLAC 才替换：
+      // 官方已有合法全曲（只是不到无损）时，只有解析确实拿到无损才替换：
       // 解析也可能只给 128k/320k，官方链更稳，不该越换越差。
-      if (!official || (resolvedBr >= 900 && fmt === 'flac')) {
+      // 判「无损」看后缀而不是码率：GD 音乐台对真 FLAC 报的是实测码率
+      // （如 855k），旧条件 `br >= 900 && flac` 会把这类真无损判成不够格，
+      // 于是明明拿到了 FLAC 还继续播官方 320k MP3。
+      if (!official || fmt === 'flac' || resolvedBr >= 900) {
         return streamResult(resolved.url, {
           source: 'resolved',
           bitrate: resolved.br ? Math.round(resolved.br * 1000) : null,

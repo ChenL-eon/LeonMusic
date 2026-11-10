@@ -238,15 +238,22 @@ impl SharedState {
         *self.pending_resume.lock() = Some((track_id, position_ms));
     }
 
-    /// 只在当前要播的正是恢复的那首歌时返回记忆位置并消费，
-    /// 避免之后手动重播同一首又被拉回旧进度。
+    /// 取「上次播放进度」：无论是否命中当前曲目，**都会消费掉这条记忆**。
+    ///
+    /// 记忆只服务于「启动后第一次真正开播」这一次机会：命中同一首就 seek
+    /// 回去，换别的歌则直接作废。旧实现只在 id 匹配时才 take，于是启动恢复
+    /// 的那首歌会一直挂在槽里 —— 用户先切到别的歌、再切回它，又被拉回上次
+    /// 的进度，表现就像「每首歌都各自记住了进度」。
     pub fn take_resume_for(&self, track_id: &str) -> Option<u64> {
-        let mut g = self.pending_resume.lock();
-        if g.as_ref().is_some_and(|(id, _)| id == track_id) {
-            g.take().map(|(_, pos)| pos)
-        } else {
-            None
+        match self.pending_resume.lock().take() {
+            Some((id, pos)) if id == track_id => Some(pos),
+            _ => None,
         }
+    }
+
+    /// 丢弃记下的恢复位置（换队列 / 清队列时调用，避免串到之后的播放里）。
+    pub fn clear_resume(&self) {
+        self.pending_resume.lock().take();
     }
 
     /// 只读不消费：Buffering 期间进度条仍显示记忆位置。
@@ -807,6 +814,9 @@ fn run_engine(
     loop {
         match rx.recv_timeout(TICK) {
             Ok(EngineCommand::Shutdown) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                // 退出前补一次落盘：暂停状态下 ticker 不刷盘，不补的话
+                // 「听完一段就关掉」会把进度丢在最后一个 5 秒窗口。
+                resume::save_async(&shared);
                 break;
             }
             Ok(cmd) => {
@@ -975,6 +985,19 @@ fn start_track(
         }
     }
 
+    // 选了无损却挂着有损缓存（改成无损档之前下载的 320k）：丢掉重新解析。
+    // 恢复上次播放时正是这条路 —— 队列里的 Track 带着旧的 file_path，
+    // 不失效的话解析链永远跑不到，也只能继续播那份 MP3。
+    // 丢掉的路径这里不留兜底：真解析不出来（离线）时由上层降级/报错处理，
+    // 引擎线程没有异步解析失败的回调可挂。
+    //
+    // 但上层刚解析好直链时绝不能再动：失效函数会连 stream_url 一起清掉，
+    // 把那张刚拿到的 FLAC 也丢回解析链；第三方偶发超时就退化成官方 320k，
+    // 表现就是「同一首歌有时无损、有时有损」。
+    if track.stream_url.is_none() {
+        let _ = crate::state::drop_stale_lossy_cache(app, &mut track);
+    }
+
     // 在线曲目还没落盘、也没有解析好的流式直链（从搜索结果直接入队的情况）。
     // 这里不能干等：引擎线程要维持 8ms 节拍，网络 IO 会直接把播放拖死。
     // 所以先把「这首歌 + 缓冲中」推给 UI 和系统面板，再请求上层异步解析，
@@ -1125,6 +1148,9 @@ fn handle_command(
                 let _ = s.set_paused(true, out);
                 shared.set_status(PlaybackStatus::Paused);
                 platform.update_playback_state(false);
+                // 暂停后 ticker 不再按 5 秒刷盘，这里补一次：否则「听到一半
+                // 暂停 → 退出」恢复出来的是上次定时保存的位置（最多差 5 秒）。
+                resume::save_async(shared);
             }
         }
         EngineCommand::Resume => {
@@ -1219,6 +1245,9 @@ fn handle_command(
             broadcast_queue(queue, shared, app);
             match index {
                 Some(idx) => {
+                    // 显式点选某首歌：启动时记下的恢复点作废，一律从 0 开始
+                    //（「继续上次」只属于播放按钮，不属于列表里的某一行）
+                    shared.clear_resume();
                     play_index(idx, queue, session, output, shared, app, platform);
                 }
                 None => {
@@ -1250,6 +1279,7 @@ fn handle_command(
             queue.clear();
             *session = None;
             *shared.track.write() = None;
+            shared.clear_resume();
             shared.source_rate.store(0, Ordering::Relaxed);
             shared.set_status(PlaybackStatus::Stopped);
             shared.position_ms.store(0, Ordering::Relaxed);

@@ -99,6 +99,18 @@ impl Db {
         })
     }
 
+    /// 清掉缓存文件绑定（音质档位升级后旧的 320k 缓存不再适用）。
+    /// 与「文件被外部删掉」的清理分开：这里文件还在，只是不该再用。
+    pub fn clear_track_file_path(&self, track_id: &str) -> AppResult<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE tracks SET file_path = NULL, updated_at = ?2 WHERE id = ?1",
+                params![track_id, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// 批量 upsert（云端歌单导入用）。单个事务，返回写入条数。
     pub fn upsert_tracks(&self, tracks: &[Track]) -> AppResult<usize> {
         if tracks.is_empty() {

@@ -13,7 +13,6 @@
 //! 里消费记忆位置 seek 过去。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,7 +48,10 @@ pub fn load() -> Option<ResumeFile> {
 }
 
 /// 异步保存。队列非空才写；失败只留日志（记忆功能不该影响播放）。
-pub fn save_async(shared: &Arc<SharedState>) {
+///
+/// 参数只借 `&SharedState`（不再要求 `&Arc`）：引擎线程的 ticker 与命令处理
+/// 都持有裸引用，收窄签名后这两处不必为了保存而克隆 Arc。
+pub fn save_async(shared: &SharedState) {
     let snap = shared.queue_snapshot();
     if snap.items.is_empty() {
         return;

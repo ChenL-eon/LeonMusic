@@ -6,6 +6,7 @@ import { storeToRefs } from "pinia";
 
 import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
+import Slider from "@/components/Slider.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
@@ -65,8 +66,18 @@ function seekLine(l: LyricLine) {
   void player.seek(l.startMs);
 }
 
-function onSeek(e: Event) {
-  void player.seek(Number((e.target as HTMLInputElement).value));
+/** 手指按下的位置（null = 没在拖）。
+ *
+ *  播放页的进度条原来用原生 input[type=range] 的 `:value` 单向绑定：
+ *  引擎每 120ms 推一次快照、rAF 每帧插值 displayPosition，Vue 每次重渲染
+ *  都把 value 写回去，正拖着的时候滑块被反复拽回播放位置，手感就是
+ *  「粘住 / 抖 / 拖不动」。这里换成本地拖动值：拖动期间界面只认手指，
+ *  松手才提交 seek（与桌面播放条同一个 Slider）。 */
+const scrubbing = ref<number | null>(null);
+
+function onSeek(v: number) {
+  scrubbing.value = null;
+  void player.seek(v);
 }
 
 let sx = 0;
@@ -158,18 +169,20 @@ function onTouchEnd(e: TouchEvent) {
       </div>
 
       <div class="bottom">
-        <div class="progress">
-          <input
-            type="range"
-            min="0"
+        <!-- stop：拖动进度条不能被播放页的下拉关闭 / 左右翻页手势抢走 -->
+        <div class="progress" @touchstart.stop>
+          <Slider
+            class="mprog"
+            :model-value="displayPosition"
             :max="Math.max(snap.durationMs, 1)"
-            step="100"
-            :value="displayPosition"
-            :style="{ '--p': ((displayPosition / Math.max(snap.durationMs, 1)) * 100).toFixed(2) + '%' }"
-            @touchstart.stop
+            :step="100"
+            @update:model-value="scrubbing = $event"
             @change="onSeek"
           />
-          <div class="times"><span>{{ fmt(displayPosition) }}</span><span>{{ fmt(snap.durationMs) }}</span></div>
+          <div class="times">
+            <span>{{ fmt(scrubbing ?? displayPosition) }}</span>
+            <span>{{ fmt(snap.durationMs) }}</span>
+          </div>
         </div>
 
         <div class="controls">
@@ -424,28 +437,28 @@ function onTouchEnd(e: TouchEvent) {
 .bottom {
   flex: none;
 }
-.progress input {
-  width: 100%;
-  height: 18px;
-  margin: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  background: transparent;
-  outline: none;
+/* 进度条走通用 Slider（pointer 事件 + touch-action:none，拖动期间只认手指）。
+   播放页底色是一张封面，主题色在这里不可读 —— 轨道/填充一律白色。
+   触摸目标 30px 高，视觉上仍是 4px 细线：手指按得中，画面不臃肿。 */
+.mprog {
+  height: 30px;
 }
-.progress input::-webkit-slider-runnable-track {
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(to right, #fff var(--p), rgba(255, 255, 255, 0.3) var(--p));
+.mprog :deep(.track) {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.28);
 }
-.progress input::-webkit-slider-thumb {
-  appearance: none;
-  -webkit-appearance: none;
+.mprog :deep(.fill) {
+  background: #fff;
+}
+.mprog :deep(.thumb) {
   width: 12px;
   height: 12px;
-  margin-top: -4.5px;
-  border-radius: 50%;
   background: #fff;
+  /* 触屏没有 hover，滑块必须常驻；桌面那套「hover 才露」在这里等于没有 */
+  transform: translate(-50%, -50%) scale(1);
+}
+.mprog.dragging :deep(.thumb) {
+  transform: translate(-50%, -50%) scale(1.3);
 }
 .times {
   display: flex;
