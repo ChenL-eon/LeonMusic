@@ -106,6 +106,9 @@ pub fn run() {
 
             // 1. 路径 & 数据库
             paths::init(&handle)?;
+            // 延迟清理历史更新包：要等 Windows 替换 helper / 安卓安装器收尾，
+            // 所以函数内部自己起线程 sleep，不阻塞启动。
+            commands::spawn_startup_cleanup();
             let db = Arc::new(Db::open(&paths::db_path()?)?);
             db::ensure_system_playlists(&db)?;
             let settings = db.load_settings()?;

@@ -518,7 +518,7 @@ async function clearCache() {
   busy.value = true;
   try {
     await store.clearCache();
-    ui.toast("缓存已清空", "success");
+    ui.toast("缓存与更新包已清空", "success");
   } finally {
     busy.value = false;
   }

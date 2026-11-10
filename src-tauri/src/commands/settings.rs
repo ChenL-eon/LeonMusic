@@ -60,6 +60,9 @@ pub fn cache_clear(app: AppHandle) -> AppResult<()> {
         let _ = std::fs::remove_file(path);
         let _ = st.db.drop_cache(&key);
     }
+    // 更新包也归「清空缓存」管：下载包、半成品、解压副本与旧版回滚备份。
+    // 否则每跨一个版本就多留一份 zip / APK，且没有任何其它入口能清掉。
+    crate::commands::cleanup_updates(true);
     Ok(())
 }
 

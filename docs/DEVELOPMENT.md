@@ -1346,3 +1346,35 @@ curl -s http://127.0.0.1:9333/json      # 拿到 webSocketDebuggerUrl
 sha256 完全一致；100% 档 `getComputedStyle` 显示底衬 alpha `0.58→0.10`、
 副文字 `color(srgb 0.557…)→color(srgb 0.157…)`。`playback-state.json` 复查
 只有 `saved_at` 刷新，`queue` / `position_ms` 未变。
+
+## 附录：应用内更新包的生命周期（2026-11-10）
+
+**症状**：在线更新完成后，下载的安装包一直留在磁盘上，且没有任何入口能清掉。
+`updates/` 每跨一个版本就多一份 zip（约 9 MB）/ APK（约 22 MB），
+再加 `stage/LeonMusic.exe` 的解压副本（约 24 MB）。
+
+**目录**：`paths::cache_dir()/updates/`，Windows 实测是
+`C:\Users\<用户>\AppData\Local\com.leonmusic.player\updates\`；
+Android 是应用私有 cache 下的同名目录。文件名直接用 Release 附件原名，
+版本号写在名字里，所以跨版本不会互相覆盖，只会越攒越多。
+
+**清理策略**（`src-tauri/src/commands/update.rs`）：
+- `cleanup_updates(false)` —— 启动时自动执行，删 `*.zip` / `*.apk` / `*.part`
+  和 `stage/`，**保留** `previous.exe`（最近一次旧版，可手动覆盖回滚，
+  下次更新时被 `Copy-Item -Force` 覆盖，始终只有一份）与 `update.log`
+  （每次覆盖写、只有几 KB，是更新失败时唯一的线索）。
+- `cleanup_updates(true)` —— 设置页「清空缓存」调用，连 `previous.exe` 一起删。
+- 只扫一级子项、按名字白名单删；占用中的文件静默跳过，下次再试。
+
+**坑**：
+- 启动清理必须**延迟**：Windows 的 helper 等旧进程退出 → 覆盖 exe → 拉起新进程，
+  之后还要观察约 8 秒；`stage/` 里的新 exe 在覆盖完成前不能删。桌面延迟 15s，
+  Android 延迟 90s（系统安装器还在读 APK）。
+- 新进程里 `LAST_DOWNLOAD` 归零，所以「更新后重启」不会被保护逻辑跳过；
+  但若**本次启动后又发生下载**（5 分钟内）整批跳过，避免删掉刚下好还没安装的包。
+- helper 的 `SWAP_TEMPLATE` 原来在成功后 `Remove-Item @@BAK@@`，现改为保留：
+  清理统一由 Rust 侧管，helper 只负责替换与回滚。模板替换抽成
+  `build_swap_script()` 后可单测校验占位符是否填全；改模板务必用
+  `[System.Management.Automation.Language.Parser]::ParseFile` 只解析不执行做语法检查。
+- `cache_clear` 以前只走 `st.cache.clear_all()` + DB 索引，完全不碰 `updates/`，
+  用户点「清空缓存」看不到任何变化；现在同步调 `cleanup_updates(true)`。

@@ -19,9 +19,9 @@
 //! 立刻自杀。唯一的办法是让一个活得更久的进程等我们退出，再覆盖、再拉起。
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -37,6 +37,10 @@ const MAX_BYTES: u64 = 300 * 1024 * 1024;
 /// 用户点了「取消」：流式循环每轮检查一次。
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// 最近一次下载/安装活动的 Unix 秒（进程内）。
+/// 启动清理靠它避开「用户刚下好、还没点安装」的包。
+static LAST_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Serialize)]
 struct Progress {
     downloaded: u64,
@@ -47,6 +51,114 @@ fn update_dir() -> AppResult<PathBuf> {
     let dir = paths::cache_dir()?.join("updates");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+// ---------------------------------------------------------------------------
+// 更新包清理
+// ---------------------------------------------------------------------------
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn mark_download() {
+    LAST_DOWNLOAD.store(now_secs(), Ordering::SeqCst);
+}
+
+fn dir_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&p) {
+            for entry in entries.flatten() {
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(entry.path()),
+                    _ => total += entry.metadata().map(|m| m.len()).unwrap_or(0),
+                }
+            }
+        }
+    }
+    total
+}
+
+/// 清掉 `updates/` 里的下载包、半成品和解压副本，返回（删除条目数, 释放字节数）。
+///
+/// `include_backup = false`（启动自动清理）保留 `previous.exe`：它是最近一次更新前
+/// 的旧版程序，留一份可在新版本出问题时手动覆盖回去；下次更新会覆盖它，始终只有一份。
+/// `include_backup = true`（设置页「清空缓存」）连它一起删。
+/// `update.log` 始终保留：每次覆盖写、只有几 KB，却是更新失败时唯一的线索。
+///
+/// 只扫一级子项且按名字白名单删除；目录里任何不认识的文件都不碰。
+/// 删除失败（文件被占用）静默跳过，下次启动或手动清理再试。
+pub fn cleanup_updates(include_backup: bool) -> (usize, u64) {
+    match update_dir() {
+        Ok(dir) => cleanup_in(&dir, include_backup),
+        Err(_) => (0, 0),
+    }
+}
+
+fn cleanup_in(dir: &Path, include_backup: bool) -> (usize, u64) {
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        let is_stage = lower == "stage";
+        let is_package = lower.ends_with(".zip")
+            || lower.ends_with(".apk")
+            || lower.ends_with(".part");
+        let is_backup = include_backup && lower == "previous.exe";
+        if !(is_stage || is_package || is_backup) {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = if is_stage {
+            dir_bytes(&path)
+        } else {
+            entry.metadata().map(|m| m.len()).unwrap_or(0)
+        };
+        let ok = if is_stage {
+            std::fs::remove_dir_all(&path).is_ok()
+        } else {
+            std::fs::remove_file(&path).is_ok()
+        };
+        if ok {
+            removed += 1;
+            freed += bytes;
+        }
+    }
+    (removed, freed)
+}
+
+/// 启动后延迟清理历史更新包。
+///
+/// 延迟是必须的：Windows 的 helper 要等旧进程退出 → 覆盖 exe → 拉起本进程，
+/// 之后还要观察约 8 秒；`stage/LeonMusic.exe` 在覆盖完成前不能删。Android 交给
+/// 系统安装器后，也得留出安装器读取 APK 的时间。
+/// 若本次启动后又发生过下载，整批跳过，避免删掉刚下好还没安装的包。
+pub fn spawn_startup_cleanup() {
+    std::thread::spawn(|| {
+        #[cfg(target_os = "android")]
+        let wait = Duration::from_secs(90);
+        #[cfg(not(target_os = "android"))]
+        let wait = Duration::from_secs(15);
+        std::thread::sleep(wait);
+
+        let last = LAST_DOWNLOAD.load(Ordering::SeqCst);
+        if last > 0 && now_secs().saturating_sub(last) < 300 {
+            return;
+        }
+        let (files, bytes) = cleanup_updates(false);
+        if files > 0 {
+            tracing::info!("cleaned {files} stale update files ({bytes} bytes)");
+        }
+    });
 }
 
 /// 文件名白名单。
@@ -90,6 +202,7 @@ pub async fn update_download(app: AppHandle, url: String, file_name: String) -> 
 
 fn download(app: &AppHandle, url: &str, name: &str) -> AppResult<String> {
     CANCELLED.store(false, Ordering::SeqCst);
+    mark_download();
 
     let dir = update_dir()?;
     let final_path = dir.join(name);
@@ -169,6 +282,7 @@ fn download(app: &AppHandle, url: &str, name: &str) -> AppResult<String> {
         )));
     }
     std::fs::rename(&part, &final_path)?;
+    mark_download();
 
     let _ = app.emit(
         EVT_UPDATE_PROGRESS,
@@ -197,6 +311,7 @@ pub fn update_cancel() {
 /// * Android：`archive` 是 APK，拉起系统安装器后立即返回。
 #[tauri::command]
 pub fn update_apply(app: AppHandle, archive: String) -> AppResult<()> {
+    mark_download();
     let path = PathBuf::from(&archive);
     if !path.is_file() {
         return Err(AppError::NotFound("更新包已被清理，请重新下载".into()));
@@ -378,28 +493,40 @@ W "spawned pid=$($n.Id)"
 $j = 0
 while ($j -lt 16) { Start-Sleep -Milliseconds 500; if ($n.HasExited) { break }; $j++ }
 if ($n -and -not $n.HasExited) {
-  Remove-Item -LiteralPath '@@BAK@@' -Force
-  W 'new instance alive'
+  # previous.exe 保留为最近一次旧版备份：由应用启动清理 / 设置页「清空缓存」管理，
+  # 下次更新 Copy-Item -Force 会覆盖它，始终只有一份。
+  W 'new instance alive; previous build kept for rollback'
 } else {
   W "new instance gone after $($j * 0.5)s (code=$($n.ExitCode)), rolling back"
   Copy-Item -LiteralPath '@@BAK@@' -Destination '@@DST@@' -Force
   Start-Process -FilePath '@@DST@@' -WorkingDirectory '@@DIR@@'
   W 'rolled back and restarted the old build'
-  # 只有还原确实生效才清理备份：还原失败时这份备份是唯一的旧版副本
-  if ((Get-Item '@@DST@@').Length -eq (Get-Item '@@BAK@@').Length) { Remove-Item -LiteralPath '@@BAK@@' -Force }
+  # 备份不删：新版起不来时，它至少是用户能手动覆盖回去的旧程序
 }
 "#;
 
-    fn spawn_swapper(new_exe: &Path, target: &Path) -> AppResult<()> {
+    /// 模板替换集中在这里：单测能直接拿到脚本字符串校验占位符，
+    /// 不必真的拉起 PowerShell 去覆盖正在运行的程序。
+    fn build_swap_script(new_exe: &Path, target: &Path, dir: &Path) -> String {
         let exe_dir = target.parent().unwrap_or(Path::new("."));
-        let dir = update_dir()?;
-        let script = SWAP_TEMPLATE
-            .replace("@@LOG@@", &ps_quote(&dir.join("update.log").display().to_string()))
-            .replace("@@BAK@@", &ps_quote(&dir.join("previous.exe").display().to_string()))
+        SWAP_TEMPLATE
+            .replace(
+                "@@LOG@@",
+                &ps_quote(&dir.join("update.log").display().to_string()),
+            )
+            .replace(
+                "@@BAK@@",
+                &ps_quote(&dir.join("previous.exe").display().to_string()),
+            )
             .replace("@@PID@@", &std::process::id().to_string())
             .replace("@@SRC@@", &ps_quote(&new_exe.display().to_string()))
             .replace("@@DST@@", &ps_quote(&target.display().to_string()))
-            .replace("@@DIR@@", &ps_quote(&exe_dir.display().to_string()));
+            .replace("@@DIR@@", &ps_quote(&exe_dir.display().to_string()))
+    }
+
+    fn spawn_swapper(new_exe: &Path, target: &Path) -> AppResult<()> {
+        let dir = update_dir()?;
+        let script = build_swap_script(new_exe, target, &dir);
 
         std::process::Command::new("powershell.exe")
             .args([
@@ -523,6 +650,21 @@ if ($n -and -not $n.HasExited) {
         }
 
         #[test]
+        fn swap_script_fills_every_placeholder() {
+            let dir = tmp("swap-script");
+            let script = build_swap_script(
+                &dir.join("stage").join("LeonMusic.exe"),
+                &dir.join("LeonMusic.exe"),
+                &dir,
+            );
+            assert!(!script.contains("@@"), "占位符没填全：{script}");
+            assert!(script.contains("previous build kept for rollback"));
+            // helper 不再删旧版备份，清理统一交给 Rust 侧
+            assert!(!script.contains("Remove-Item -LiteralPath"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn encodes_script_as_utf16le_base64() {
             // PowerShell 的 -EncodedCommand 只认这种编码：
             // base64(UTF-16LE)，用 UTF-8 会直接报「命令行参数格式错误」
@@ -577,7 +719,7 @@ mod android {
 
 #[cfg(test)]
 mod name_tests {
-    use super::safe_name;
+    use super::{cleanup_in, safe_name};
 
     #[test]
     fn rejects_path_like_names() {
@@ -604,5 +746,43 @@ mod name_tests {
         ] {
             assert_eq!(safe_name(good).unwrap(), good);
         }
+    }
+
+    #[test]
+    fn cleanup_removes_packages_but_keeps_rollback_backup() {
+        let dir = std::env::temp_dir().join("leonmusic-update-cleanup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("stage")).unwrap();
+        let fixtures: [(&str, &[u8]); 7] = [
+            ("LeonMusic-1.3.0-windows-x64-portable.zip", b"zip"),
+            ("LeonMusic-1.4.0-android-arm64.apk", b"apk"),
+            ("half.part", b"part"),
+            ("update.log", b"log"),
+            ("previous.exe", b"old"),
+            ("keep.txt", b"keep"),
+            ("stage/LeonMusic.exe", b"exe"),
+        ];
+        for (name, data) in fixtures {
+            std::fs::write(dir.join(name), data).unwrap();
+        }
+
+        // 启动自动清理：删包、半成品、解压副本，留备份与日志
+        let (n, bytes) = cleanup_in(&dir, false);
+        assert_eq!(n, 4);
+        assert!(bytes > 0);
+        assert!(!dir.join("LeonMusic-1.3.0-windows-x64-portable.zip").exists());
+        assert!(!dir.join("LeonMusic-1.4.0-android-arm64.apk").exists());
+        assert!(!dir.join("half.part").exists());
+        assert!(!dir.join("stage").exists());
+        assert!(dir.join("previous.exe").exists());
+        assert!(dir.join("update.log").exists());
+        assert!(dir.join("keep.txt").exists());
+
+        // 「清空缓存」：连旧版备份一起删，日志仍保留供排障
+        let (n2, _) = cleanup_in(&dir, true);
+        assert_eq!(n2, 1);
+        assert!(!dir.join("previous.exe").exists());
+        assert!(dir.join("update.log").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
