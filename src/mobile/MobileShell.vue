@@ -346,10 +346,11 @@ html[data-custom-bg] .m-sub::before {
   background-position: center;
   background-size: cover;
   filter: blur(18px) saturate(115%);
-  /* 0.42 不是随手写的：首页的照片可见度 = 0.42（58% 蒙层）× 用户透明度，
-     这里没有蒙层，只能靠 opacity 直接对齐同一档 —— 换成 0.9 时二级页比
-     首页暗一倍，浅色主题下整页发灰。 */
-  opacity: calc(var(--bg-image-opacity, 0.35) * 0.42);
+  /* 二级页没有蒙层，只能靠 opacity 对齐首页的「照片最终可见度」。
+     以前写死 × 0.42（对应首页固定 58% 底衬），首页改成联动后这里若不动，
+     滑块拉满时二级页仍比首页暗一倍。--m-photo-visible 与首页共用同一套
+     映射（settings store 的 bgOpacityCssVars），两级永远同档。 */
+  opacity: var(--m-photo-visible, 0.147);
   pointer-events: none;
 }
 .m-sub-head b {

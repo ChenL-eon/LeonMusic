@@ -89,4 +89,14 @@ const emit = defineEmits<{
 .heart.on {
   color: #ef5a72;
 }
+
+/* 自定义背景拉满时照片几乎全透，--text-3 的浅灰副文字/心形会被亮部吃掉。
+   --m-shield 由 settings store 按「图片透明度」联动（0% → 85%）；0% 时
+   color-mix 的结果正好等于 --text-3，默认档与开启背景前完全一致。
+   加 html[data-custom-bg] 前缀是为了压过上面 .sub / .heart 的基础色；
+   .heart.on 的红色「已喜欢」状态用 :not(.on) 排除，不能被改色。 */
+html[data-custom-bg] .sub,
+html[data-custom-bg] .heart:not(.on) {
+  color: color-mix(in srgb, var(--text) var(--m-shield, 0%), var(--text-3));
+}
 </style>

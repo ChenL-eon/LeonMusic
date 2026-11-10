@@ -43,11 +43,14 @@ html[data-theme="dark"] .mobile-shell {
    （桌面没有这层壳，所以桌面正常）。这里让出的颜色与 body 的 canvas 完全
    一致，没有背景图时视觉零变化。
 
-   不是全透明，留 58%：手机是单列全屏，歌曲行没有卡片承托、正文直接压在
-   照片上，照片一花整页就没法读，这一层是它们的「纸」。比桌面的 .main
-   （66%）再透一档 —— 屏幕小，盖太实就完全看不出开过图。 */
+   不是全透明，留一层底衬：手机是单列全屏，歌曲行没有卡片承托、正文直接
+   压在照片上，照片一花整页就没法读，这一层是它们的「纸」。
+   --m-veil 由 settings store 按「图片透明度」联动（见 bgOpacityCssVars）：
+   默认 35% 时仍是 58%，观感不变；拉到 100% 降到 10%，照片可见度从原来的
+   0.42 提到 0.90。固定 58% 是「透明度开到最高还是不够透」的根因 —— 那时
+   .app-bg 就算 opacity:1，也被这层壳压掉一大半。 */
 html[data-custom-bg] .mobile-shell {
-  background-color: color-mix(in srgb, var(--bg) 58%, transparent);
+  background-color: color-mix(in srgb, var(--bg) var(--m-veil, 58%), transparent);
   background-image: none;
 }
 
@@ -242,7 +245,10 @@ html[data-custom-bg] .mobile-shell {
    细节比桌面更容易吃掉文字，宁可多盖一点。
    ========================================================================== */
 html[data-custom-bg] {
-  --m-glass: color-mix(in srgb, var(--panel) 80%, transparent);
+  /* 卡片玻璃也跟着让一点位：默认 80%（原值、文字可读性不变），透明度拉满
+     时降到 70%，让照片从卡片里透出来。降幅刻意小 —— 卡片要托住小字号正文，
+     再透就会吃掉文字。联动值由 settings store 写入。 */
+  --m-glass: color-mix(in srgb, var(--panel) var(--m-glass-alpha, 80%), transparent);
   --m-glass-blur: blur(14px) saturate(140%);
 }
 
@@ -281,6 +287,15 @@ html[data-custom-bg] .fm-card {
    底下要托住光标和占位文字；12% 的透光量不值得再挂一层 backdrop-filter。 */
 html[data-custom-bg] .ms-search {
   background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+
+/* 照片全透时，--text-2 那档浅灰图标会被亮部吃掉。用联动的 --m-shield
+   把它往主文字色拉；0%（默认档）时 color-mix 结果正好等于原值。
+   只改颜色、不加 text-shadow / drop-shadow：阴影会让卡片里的白字发糊，
+   逐帧 filter 也会拖慢安卓 WebView 滚动。.on 是「已喜欢」的红色，必须排除。
+   歌曲行更浅的 --text-3 副文字在 MobileTrackRow.vue 里按同一变量处理。 */
+html[data-custom-bg] .m-icon:not(.on) {
+  color: color-mix(in srgb, var(--text) var(--m-shield, 0%), var(--text-2));
 }
 
 /* 二级页（.m-sub）不在这里处理：它盖在首页之上，透出来的是首页内容而不是

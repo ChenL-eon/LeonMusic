@@ -16,7 +16,7 @@ import {
 } from "@/api/ipc";
 import type { AudioDiag, PluginInfo } from "@/types";
 import type { UpdateProgress } from "@/api/ipc";
-import { STREAM_PLUGIN_IDS, useSettingsStore } from "@/stores/settings";
+import { STREAM_PLUGIN_IDS, applyBgOpacityVars, useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
 
 const store = useSettingsStore();
@@ -291,12 +291,14 @@ watch(
   { immediate: true },
 );
 
-/** 拖动时只改 CSS 变量做实时预览，松手才落盘，避免每个像素都写一次 DB。 */
+/** 拖动时只改 CSS 变量做实时预览，松手才落盘，避免每个像素都写一次 DB。
+ *  走 applyBgOpacityVars 是为了让移动端的底衬 / 玻璃 / 二级页一起联动预览，
+ *  不能只改 --bg-image-opacity —— 那层固定蒙层会把滑块后半程吃干净。 */
 function onBgOpacityInput(e: Event) {
   const v = Number((e.target as HTMLInputElement).value);
   bgOpacityDragging.value = true;
   bgOpacityDraft.value = v;
-  document.documentElement.style.setProperty("--bg-image-opacity", String(v / 100));
+  applyBgOpacityVars(document.documentElement, v);
 }
 
 /** 松手落盘。`change` 与 `pointerup` 都可能触发，用「值没变就不写」去重。 */
