@@ -949,6 +949,50 @@ boa_engine = { version = "0.22", features = ["jsvalue-enum"] }
 现在 `player` store 监听状态流时会 toast 出来，并按文本去重（否则同一条错误
 会连着弹几十次；error 清空后要重置，不然重试同一首不再提示）。
 
+**移动端进度条拖不动：原生 range 被 120ms 快照反复写回**
+
+播放页原来用 `input[type=range]` + `:value="displayPosition"` 单向绑定。
+引擎每 120ms 推一次快照、前端 rAF 每帧插值，Vue 每次重渲染都把 `value`
+写回播放位置 —— 手指正拖着，滑块被一次次拽回去，手感就是「粘住 / 抖」。
+而且原生 range 的 WebView 默认样式在沉浸式封面上几乎看不见滑块，`step=100`
+配 `@change` 只在松手提交，拖动途中连时间都不跟着走。改成复用桌面那套
+`Slider.vue`（pointer 事件 + `touch-action:none` + 拖动期间不认外部值），
+拖动中把值存进 `scrubbing`、松手 `@change` 才 `seek`；触摸目标 30px 高、
+视觉仍是 4px 细线，滑块常驻并放大 1.3 倍，`@touchstart.stop` 防止播放页的
+下拉关闭 / 左右翻页手势抢走拖动。
+
+**「部分歌曲命中不了 FLAC」：四个独立原因叠在一起**
+
+1. 官方 eapi 对某些曲目 **code 200、非试听、但静默忽略 `level`** 只给 320k。
+   旧逻辑「非试听直接 return」，第三方解析链根本没机会跑。改为记下这条
+   合法全曲后跳出循环，继续问解析源，只有解析确实拿到 FLAC 才替换。
+2. GD 音乐台对真 FLAC 报的是**实测码率**（《她》855k，28.9MB），不是「无损」
+   标记。旧条件 `br >= 900 && fmt === 'flac'` 把这类真无损判成不够格，
+   明明拿到了 FLAC 还继续播官方 MP3。现在按 URL 后缀抬到 900。
+3. 音质档从 320k 升到无损后，DB 的 `tracks.file_path` 还钉着当年那份 MP3
+   缓存：`ensure_playable` 走「文件已存在」快捷路，解析链永远跑不到。
+   `state::drop_stale_lossy_cache` 在「用户要无损 + 落盘是有损容器」时清掉
+   内存与 DB 的绑定，解析失败才退回那份 MP3（离线仍能听）。
+4. **同一个函数会在引擎 `start_track` 里再跑一次**：恢复上次播放时队列里的
+   Track 带着旧 `file_path`，本该失效；但上层刚解析好直链的那一轮也会走到
+   这里，函数连 `stream_url` 一起清掉，把刚拿到的 FLAC 丢回解析链，第三方
+   偶发超时就退化成官方 320k —— 表现就是「同一首歌有时无损有时有损」。
+   加 `if track.stream_url.is_none()` 保护。配套两处：预解析槽不再写入
+   `downgraded` 的结果、命中时也不接受 `downgraded` 的槽（一次抖动不该被
+   钉成「这首以后都 320k」）；`gdResolve` 改成本次调用内最多问两次、超时
+   4s→6s。顺带删掉模块级「冷却 10 分钟」—— 宿主每次调用都新建
+   `Context::default()`，跨调用根本不生效，旧注释是错的。
+
+**切歌时被拉回这首歌上次的进度**
+
+启动恢复把「曲目 id + 位置」放进 `pending_resume`，旧 `take_resume_for` 只在
+id 匹配时才 `take`。用户启动后先切到别的歌，槽不消费；再切回第一首就又被
+seek 回去，看起来像「每首歌各自记住了进度」。改成**无论是否匹配都消费**，
+并新增 `clear_resume()` 在 `SetQueue(index)` / `QueueClear` 时调用：记忆只服务
+「退出重开后点播放」这一次机会，显式点选列表里的某一首一律从 0 开始。
+`peek_resume_for` 保留只读语义，供 Buffering 期间显示记忆位置。暂停与退出
+各补一次落盘（ticker 是 5 秒一刷，暂停后不再刷，不补会差最多 5 秒）。
+
 ---
 
 ## 7. 设计决策速查
@@ -1223,6 +1267,9 @@ AES-CBC / AES-ECB / RSA-NoPadding 与 Node `crypto` 逐字节对齐、
 | 桌面自定义背景 → 标题栏（本次） | Windows release 构建 + WebView2 CDP 截图（`Page.captureScreenshot`）+ 逐行像素采样 | ✅ 根因：`TitleBar.vue` 自带一条 `linear-gradient(--bg 88% → transparent)`，本来给纯色界面做「滚动内容穿过标题带」的柔和过渡，压在照片上就成了一条灰雾带（采样：y=0~45 全是 rgb≈240 的灰，照片到 y≈80 才完全露面），把标题栏和下面三块玻璃切成两段。修复 `html[data-custom-bg] .titlebar { background: transparent }`，照片一直铺到窗口顶端。连带问题：整条透明后窗口控制按钮直接压在照片上，浅色主题的深灰图标（`--text-2` `#5c5c70`）在暗照片上几乎消失；先试「白色图标 + `drop-shadow` 描边」，纯白照片下仍偏弱，最终给 `.controls` 一小块自带玻璃底（`--bg` 72% + `blur(10px) saturate(140%)` + 左下 12px 圆角 + `overflow: hidden` 裁掉按钮 hover 的方角），图标继续用主题色，深浅主题自动适配。验证矩阵：深色森林 / 浅灰雪山 / 纯白三张背景 × 浅色 / 深色主题，按钮均清晰、无横贯色带（灰带只在 138×38 的右上角控件区以内）。**回归**：关掉背景后 `.titlebar` 的 computed `background-image` 恢复为原渐变、`.controls` 回到 `rgba(0,0,0,0)` / `none` / `0px`，截图与改动前一致 |
 | 标题栏与主界面完全融合（本次续） | Windows release 构建 + WebView2 CDP，浅色 / 深色 × 开 / 关背景四种组合，逐行像素采样 | ✅ 上一行只修了「开背景」的场景，默认界面（无背景图）的标题栏仍然带那条 `--bg` 88% 渐变：它只含纯色、不含 `--bg-grad` 的径向光晕，等于把主界面顶部的光晕（浅色 `#e6e0ff` / 深色 `#1d1736`）抹成一条纯色带 —— 浅色下白带、深色下黑带，大面积匀色下人眼对 2~7 级亮度差特别敏感（马赫带），一眼就看出窗口顶部「贴了一条」。而内容其实穿不过去（`.sidebar` / `.main` 的 `padding-top` 都含 `--titlebar-h`，滚动在各自容器内部），这条渐变纯属装饰。改成 `background: transparent` 并删掉 `transition` 与 main.css 里两条只为它服务的透明覆盖（`data-immersive` / `data-custom-bg`）。改后采样无跳变：浅色 y=0→80 恒为 `rgb(240,239,249)`，深色 `rgb(14,13,24)` → `rgb(13,12,21)`；左上紫光从窗口顶端自然扩散。开背景场景用 CSS 注入模拟验证（不碰数据库）：`.titlebar` 的 `background-image` 为 `none`，`.controls` 仍是 `color(srgb … / 0.72)` + `blur(10px) saturate(1.4)`，玻璃底未受影响 |
 | 移动端自定义背景玻璃（本次） | Windows release 构建 + CDP `Emulation.setDeviceMetricsOverride`（412×915 @2x，触发 `matchMedia(max-width:860px)` 挂上 MobileShell）+ 截图；背景图与 `data-custom-bg` 用 CSS 注入模拟（`build/cdp_mobile_shot.cjs`），不读不写用户数据库 | ✅ 结论先行：桌面的玻璃全在 `@media (min-width:861px)` 内，手机端此前**一条都没适配**，除了「让壳透明」的修复外，卡片仍是实心 `--panel`。移动端改用两层：`.app-bg` 自身 `blur(14px)`（fixed 层只合成一遍，替代全屏 `backdrop-filter`）+ `.mobile-shell` 58% 蒙层；元素级玻璃（`.m-card` / `.m-chip` / `.m-round` / `.ms-card` / `.fm-card` / 二级页里的 `.card`）80% + `blur(14px) saturate(140%)`，主色按钮用 `:not(.on)` / `:not(.primary)` 排除。**踩到的坑**：`.m-sub` 一度改成 58% 半透明，截图里首页的「推荐 / 电台」胶囊、私人 FM、每日推荐整片从设置页后面透出来（透的是下面那层内容，不是照片）；改为底色保持不透明 + `::before` 自铺 `blur(18px)` 照片（`opacity = 用户透明度 × 0.42`，与首页可见度对齐）。设置页搜索胶囊单独给 88%（否则浅色主题下它是唯一一块纯白，像贴了张纸）。深浅两套主题各截首页 / 设置页 / 分类详情，文字与图标均可读、卡片透出背景光带。**回归**：清掉 `data-custom-bg` 后 `.mobile-shell` 计算样式为 `rgb(244,244,248)` + 原渐变、`.m-card` 为 `rgb(255,255,255)` 且 `backdrop-filter: none`，截图与改动前一致 |
+| 移动端进度条拖动（本次） | Windows release 构建 + CDP `Emulation.setDeviceMetricsOverride` 412×915 @2x + `Input.dispatchTouchEvent` 真实触摸注入（`build/cdp_mobile_drag.cjs`），截拖动中与松手后两帧 | ✅ 拖动中滑块常驻、放大到 1.3 倍，填充与左手时间同步跟手（2:22 / 4:18，约 53%）；松手后时间继续走（2:24），`seek` 已提交、布局无错位。回归：桌面 `PlayerBar.vue` 仍用同一个 `Slider.vue`，未改动 |
+| 无损命中率（本次） | CDP 直调 `plugin_resolve_stream` 五首 + `player_snapshot` 多次播放 + 手工把 DB `file_path` 钉回 320k MP3 复现升级场景 | ✅ 解析层 5/5 拿到 `.flac`（《侠》《她》《晴天》《海阔天空》《水之湄》，分别来自网易 CDN / 咪咕 / 酷我 BD）；干净播放连续 3 次均 `source=resolved / format=flac / downgraded=false`，落盘 `.flac`；**钉回 MP3 后**从曲库单曲点播也自动失效并重解析到 FLAC，DB 绑定被改写成 `.flac`；启动恢复点播放同样拿到 FLAC。修复前对照：同一首《她》钉回 MP3 后播放是 `source=official / bitrate=320001 / downgraded=true` |
+| 播放进度记忆（本次） | CDP 驱动播到 60s → `player_next` → `player_prev`；另起一轮播到 75s → 暂停 → 强杀 → 重启 → `player_play` | ✅ 切走再切回第一首从 **3.2s**（≈0）开始，不再回到 60s；启动后 `idle` 显示《她》81.49s、点播放从 84.55s 继续，`status=playing`。`SetQueue(index)` / `QueueClear` 均清槽，`peek_resume_for` 只读不消费。验收前备份了用户真实状态，测试完已还原（`cur=10`、`爱在`、`pos=0`） |
 
 > **没有会员账号，所以没验到 803**：登录成功后写 cookie、会员曲目恢复完整时长
 > 这两步只能靠协议对齐保证——`type=3`、二维码 URL、账号接口路径均与
@@ -1259,3 +1306,43 @@ curl -s http://127.0.0.1:9333/json      # 拿到 webSocketDebuggerUrl
 
 仅供个人学习与技术研究。音源插件连接的是**你自己的服务器**或第三方接口，
 曲库版权与合规责任由使用者承担。
+
+---
+
+## 附录：移动端「图片透明度」联动（2026-11-10）
+
+**症状**：安卓 / 窄屏把「图片透明度」拉到 100%，背景图依然很淡，桌面正常。
+
+**根因**：移动端 `.mobile-shell` 是独立层叠上下文，安卓「选了图却看不到」时
+让出的那层 **58% 底衬是固定值**，不随 `--bg-image-opacity` 变化。所以
+`.app-bg` 即使 `opacity:1`，照片最终可见度也只有 `1 × (1-0.58) = 0.42`；
+二级页 `.m-sub::before` 还写死了 `× 0.42`，两级一起偏淡。
+
+**做法**：`src/stores/settings.ts` 的 `bgOpacityCssVars()` 统一算出 5 个变量，
+启动 `applyTheme` / 拖动预览 / 落盘共用同一套映射，避免两处漂移：
+
+| 变量 | 35%（默认） | 100% | 消费方 |
+|---|---|---|---|
+| `--bg-image-opacity` | 0.35 | 1 | `main.css`（桌面也用） |
+| `--m-veil` | 58% | 10% | `mobile.css` 的 `.mobile-shell` 底衬 |
+| `--m-glass-alpha` | 80% | 70% | `mobile.css` 的 `--m-glass` |
+| `--m-shield` | 0% | 85% | 副文字 / 图标对比度补偿 |
+| `--m-photo-visible` | 0.147 | 0.90 | `MobileShell.vue` 二级页 `::before` |
+
+≤35%（含默认值）全部保持原值，**默认档像素级无回归**；照片可见度 0.42 → 0.90。
+
+**坑**：
+- 别用 `text-shadow` / `drop-shadow` 救可读性：实测会让卡片里的白字发糊，
+  逐帧 filter 还拖慢 WebView 滚动。直接联动 `color-mix()` 把 `--text-2/3`
+  往 `--text` 拉更干净（0% 时结果正好等于原色）。
+- `.m-icon.on` / `.heart.on` 是「已喜欢」红色，联动规则必须 `:not(.on)` 排除。
+- `mobile.css` 只由 `MobileShell.vue` 引入，桌面不受影响；`MobileTrackRow.vue`
+  是 scoped 样式，`html[data-custom-bg] .sub` 这种前缀能压过基础色（已验证生效）。
+
+**验证**：`npm run build`（vue-tsc 0 错误）→ `touch src-tauri/build.rs` →
+`cargo build --release --features custom-protocol`。CDP 用
+`build/cdp_mobile_shot.cjs` 压到 412×915 视口、注入高对比度渐变当测试背景
+（只改内存 CSS，不碰用户设置），35% / 100% 各截一张：改动前后 35% 截图
+sha256 完全一致；100% 档 `getComputedStyle` 显示底衬 alpha `0.58→0.10`、
+副文字 `color(srgb 0.557…)→color(srgb 0.157…)`。`playback-state.json` 复查
+只有 `saved_at` 刷新，`queue` / `position_ms` 未变。
