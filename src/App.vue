@@ -5,6 +5,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import QueueDrawer from "@/components/QueueDrawer.vue";
+import PlaylistContextMenu from "@/components/PlaylistContextMenu.vue";
 import PlayerBar from "@/components/PlayerBar.vue";
 import Sidebar from "@/components/Sidebar.vue";
 import TitleBar from "@/components/TitleBar.vue";
@@ -17,12 +18,13 @@ import PlaylistView from "@/views/PlaylistView.vue";
 import Search from "@/views/Search.vue";
 import SettingsView from "@/views/Settings.vue";
 import MobileShell from "@/mobile/MobileShell.vue";
-import { player as playerApi } from "@/api/ipc";
+import { app as appApi, player as playerApi } from "@/api/ipc";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
 import { useUiStore, type Page } from "@/stores/ui";
 import { backfillQqCovers } from "@/utils/qqCoverBackfill";
+import { autoCheckResult, checkRelease, type Channel } from "@/utils/updateCheck";
 
 const ui = useUiStore();
 const player = usePlayerStore();
@@ -105,7 +107,42 @@ onMounted(async () => {
     clearTimeout(bootTimer);
     booting.value = false;
   }
+  scheduleAutoUpdateCheck();
 });
+
+/**
+ * 启动时自动检测：默认开启，延迟到首屏稳定后才发请求。
+ * 失败一律静默（网络不通 / 接口限流不该打扰启动），发现新版才提示一次；
+ * 结果写进共享缓存，设置页打开时直接复用，不必再手动点一次检测。
+ */
+function scheduleAutoUpdateCheck() {
+  if (settingsStore.value.autoCheckUpdate === false) return;
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        const channel: Channel =
+          settingsStore.value.updateChannel === "global" ? "global" : "cn";
+        const version = await appApi.getVersion().catch(() => "");
+        // 拿不到本地版本就放弃本次检测：空版本比较会把任意 release 误判成新版
+        if (!version) return;
+        const outcome = await checkRelease({
+          channel,
+          platformKind: settingsStore.platform?.kind ?? "other",
+          appVersion: version,
+        });
+        autoCheckResult.value = { at: Date.now(), channel, outcome };
+        if (outcome.kind === "available") {
+          ui.toast(
+            `发现新版本 ${outcome.release.tag} · 可在「设置 → 更新与关于」中更新`,
+            "info",
+          );
+        }
+      } catch {
+        // 附加便利功能：静默失败，用户仍可在设置页手动检测
+      }
+    })();
+  }, 3500);
+}
 
 async function toggleLyricWindow() {
   try {
@@ -160,6 +197,7 @@ async function toggleLyricWindow() {
     </div>
 
     <QueueDrawer />
+    <PlaylistContextMenu />
 
     <div class="toasts">
       <transition-group name="fade">

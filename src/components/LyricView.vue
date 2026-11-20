@@ -412,7 +412,8 @@ onBeforeUnmount(() => {
  * 高亮不用 accent 色（彩色字在照片背景上发脏），靠大小和透明度区分。
  */
 .lyrics.immersive .line {
-  padding: 20px 18px;
+  /* 沉浸播放页歌词行距加大一点，读起来更舒展 */
+  padding: 27px 18px;
   opacity: 0.32;
   filter: none;
 }

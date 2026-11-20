@@ -739,6 +739,7 @@ fn remote_to_track(plugin_id: &str, r: RemoteTrack) -> Track {
         bitrate: None,
         sample_rate: None,
         channels: None,
+        vip: r.vip,
         added_at: chrono::Utc::now().timestamp_millis(),
     }
 }

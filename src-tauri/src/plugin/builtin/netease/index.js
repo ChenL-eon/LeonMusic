@@ -861,7 +861,8 @@ function search(keyword, page, limit) {
       artist: artistNames(s.ar || s.artists),
       album: al.name || '',
       durationMs: s.dt || s.duration || 0,
-      coverUrl: httpsUrl(al.picUrl || '')
+      coverUrl: httpsUrl(al.picUrl || ''),
+      vip: isFeeVip(s.fee)
     });
   }
   return out;
@@ -1023,6 +1024,21 @@ function getLyric(track) {
 // 全部走 weapi POST；推荐系接口统一 postWeb（纯登录 cookie 的 web 指纹，
 // 与登录环境同构）。未登录时服务端对需登录接口返回 code:301，如实降级。
 
+/** 网易云歌曲级付费标记：fee=1 会员专享 / 2 数字专辑 / 3 单曲购买，
+ *  都算「需要会员或付费」，前端据此在歌名后显示 VIP 标。0/undefined 免费。 */
+function isFeeVip(fee) {
+  var n = Number(fee) || 0;
+  return n === 1 || n === 2 || n === 3;
+}
+
+/** QQ 音乐付费标记：musicu 的 pay.pay_month / pay.pay_play，
+ *  与 client_search_cp 的 pay.paytrackmouth / pay.payplay 字段名不同，兼容两者。 */
+function isQqVip(pay) {
+  if (!pay) return false;
+  return Number(pay.pay_month || pay.paytrackmouth || 0) > 0 ||
+    Number(pay.pay_play || pay.payplay || 0) > 0;
+}
+
 function songToTrack(s) {
   if (!s) return null;
   var al = s.al || s.album || {};
@@ -1033,7 +1049,8 @@ function songToTrack(s) {
     artist: artistNames(ar),
     album: al.name || '',
     durationMs: s.dt || s.duration || 0,
-    coverUrl: httpsUrl(al.picUrl || '')
+    coverUrl: httpsUrl(al.picUrl || ''),
+    vip: isFeeVip(s.fee)
   };
 }
 
@@ -1273,7 +1290,8 @@ function qqPlaylist(disstid) {
       artist: artistNames(s.singer),
       album: s.albumname || (s.album && s.album.name) || '',
       durationMs: (Number(s.interval) || 0) * 1000,
-      coverUrl: qqCoverUrl(s) || fallbackCover
+      coverUrl: qqCoverUrl(s) || fallbackCover,
+      vip: isQqVip(s.pay)
     });
   }
   if (!tracks.length) throw new Error('QQ 音乐歌单里没有可导入的曲目');

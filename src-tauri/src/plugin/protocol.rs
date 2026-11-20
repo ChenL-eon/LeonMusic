@@ -103,6 +103,9 @@ pub struct RemoteTrack {
     pub duration_ms: i64,
     #[serde(default)]
     pub cover_url: Option<String>,
+    /// 平台会员专享标记，插件从网易云 fee / QQ 音乐 pay 解析。
+    #[serde(default)]
+    pub vip: bool,
 }
 
 /// 推荐流 / 账号歌单里的歌单元数据（不含曲目列表）。

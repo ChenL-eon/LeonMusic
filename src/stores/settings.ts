@@ -45,6 +45,7 @@ const DEFAULTS: Settings = {
   cacheLimitMb: 2048,
   crossfadeMs: 0,
   updateChannel: "cn",
+  autoCheckUpdate: true,
 };
 
 /** 自建流媒体服务的插件 id：由设置页「流媒体」总开关统一启停。

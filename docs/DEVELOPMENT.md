@@ -1378,3 +1378,22 @@ Android 是应用私有 cache 下的同名目录。文件名直接用 Release �
   `[System.Management.Automation.Language.Parser]::ParseFile` 只解析不执行做语法检查。
 - `cache_clear` 以前只走 `st.cache.clear_all()` + DB 索引，完全不碰 `updates/`，
   用户点「清空缓存」看不到任何变化；现在同步调 `cleanup_updates(true)`。
+
+---
+
+## 附：设置页折叠、启动检测与播放条居中（v1.5.0 之后）
+
+- `Settings.vue` 的 `.plugin.card`（音源插件 + 流媒体）默认收起，只留标题行与总开关；
+  展开状态放在组件内的 `expandedPlugins`，**不持久化**，重进设置页回到全收起。
+  箭头按钮与标题区都能切换，`<label class="switch" @click.stop>` 防止点开关时顺带折叠。
+- 播放条 `.bar` 第一列是 `minmax(180px, 1fr)`，`.left` 原来没写 `justify-content`，
+  短歌名时封面+文字贴左、右侧空一大截；桌面补 `center`，
+  `@media (max-width: 860px)` 里显式回 `flex-start`（那一列紧挨控制键，居中反而更散）。
+- 「启动时自动检测」是 `Settings.autoCheckUpdate`（Rust `auto_check_update`，默认 true）。
+  **新增 bool 设置必须同时改 `db/models.rs` 的 struct 与 `Default`**：
+  `settings_update` 收的是强类型 `Settings`，只改前端的话回写时字段会被丢掉，
+  用户关掉后重启又变回开启。结构体级 `#[serde(default)]` 保证旧存档按默认开启。
+- 检测逻辑从 `Settings.vue` 抽到 `src/utils/updateCheck.ts`：`App.vue` 启动 3.5s 后
+  静默检测（失败不打扰），成功结果写进模块级 `autoCheckResult`；
+  `Settings.vue` 挂载时或 watch 到结果时直接复用，用户看到提示点进去就能「立即更新」，
+  不必再手动点一次检测。切渠道自增 `checkSeq`，旧请求返回后丢弃。

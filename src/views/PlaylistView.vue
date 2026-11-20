@@ -9,6 +9,7 @@ import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
 import { useSettingsStore } from "@/stores/settings";
+import { openPlaylistMenu } from "@/utils/playlistMenu";
 import type { Track } from "@/types";
 
 const library = useLibraryStore();
@@ -224,6 +225,7 @@ onUnmounted(() => clearTimeout(pulseTimer));
           :key="p.id"
           class="pl-card"
           @click="library.openPlaylist(p.id)"
+          @contextmenu="openPlaylistMenu($event, p)"
         >
           <CoverArt
             class="pl-cover"
@@ -238,19 +240,9 @@ onUnmounted(() => clearTimeout(pulseTimer));
       </div>
     </template>
 
-    <!-- 右下角悬浮操作：定位到正在播放（上）、回到顶部（下）。
+    <!-- 右下角悬浮操作：回到顶部（上）、定位到正在播放（下）。
          回到顶部用 CSS 隐藏而不是 v-if，保住占位，否则定位按钮会随之下跳。 -->
     <div class="fab">
-      <button
-        v-if="active && tracks.length"
-        class="fab-btn locate"
-        :class="{ idle: !canLocate }"
-        title="定位到正在播放"
-        aria-label="定位到正在播放"
-        @click="locateCurrent"
-      >
-        <Icon name="locate" :size="19" />
-      </button>
       <button
         class="fab-btn top"
         :class="{ show: scrolled }"
@@ -261,6 +253,16 @@ onUnmounted(() => clearTimeout(pulseTimer));
         @click="scrollToTop"
       >
         <Icon name="arrow-up" :size="19" />
+      </button>
+      <button
+        v-if="active && tracks.length"
+        class="fab-btn locate"
+        :class="{ idle: !canLocate }"
+        title="定位到正在播放"
+        aria-label="定位到正在播放"
+        @click="locateCurrent"
+      >
+        <Icon name="locate" :size="19" />
       </button>
     </div>
   </div>

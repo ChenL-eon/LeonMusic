@@ -10,6 +10,7 @@ import Icon from "@/components/Icon.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore, type Page } from "@/stores/ui";
+import { openPlaylistMenu } from "@/utils/playlistMenu";
 
 const ui = useUiStore();
 const library = useLibraryStore();
@@ -90,6 +91,7 @@ function go(p: Page) {
           :key="p.id"
           class="pl-item"
           @click="library.openPlaylist(p.id); go('playlist')"
+          @contextmenu="openPlaylistMenu($event, p)"
         >
           <CoverArt
             class="pl-cover"

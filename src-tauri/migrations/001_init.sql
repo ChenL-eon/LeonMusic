@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     bitrate         INTEGER,
     sample_rate     INTEGER,
     channels        INTEGER,
+    vip             INTEGER NOT NULL DEFAULT 0,  -- 平台会员专享曲目（网易云 fee / QQ pay）
     added_at        INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL
 );

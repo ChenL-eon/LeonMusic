@@ -86,6 +86,9 @@ pub struct Track {
     pub sample_rate: Option<u32>,
     #[serde(default)]
     pub channels: Option<u16>,
+    /// 平台会员专享曲目（网易云 fee=1 / QQ 音乐 pay.pay_month），前端在歌名后显示 VIP 标。
+    #[serde(default)]
+    pub vip: bool,
     #[serde(default)]
     pub added_at: i64,
 }
@@ -445,6 +448,7 @@ mod tests {
             bitrate: None,
             sample_rate: None,
             channels: None,
+            vip: false,
             added_at: 0,
         };
         let json = serde_json::to_string(&t).unwrap();

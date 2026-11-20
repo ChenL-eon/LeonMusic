@@ -2,6 +2,7 @@
 /** 参考 KA Music 的歌曲行：方形封面 + 标题/副标题 + 心形 + 三点。 */
 import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import type { Track } from "@/types";
 
 withDefaults(
@@ -30,7 +31,10 @@ const emit = defineEmits<{
       class="art"
     />
     <div class="meta">
-      <div class="title">{{ track.title }}</div>
+      <div class="title">
+        {{ track.title }}
+        <VipBadge v-if="track.vip" :track="track" small />
+      </div>
       <div class="sub">{{ track.artist || "未知艺术家" }}</div>
     </div>
     <button class="m-icon heart" :class="{ on: fav }" aria-label="喜欢" @click.stop="emit('favorite', track)">

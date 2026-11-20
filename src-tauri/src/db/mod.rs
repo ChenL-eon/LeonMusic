@@ -33,6 +33,8 @@ impl Db {
         conn.execute_batch(SCHEMA)?;
         ensure_column(&conn, "playlists", "cover_url", "ALTER TABLE playlists ADD COLUMN cover_url TEXT")?;
         ensure_column(&conn, "playlists", "remote_key", "ALTER TABLE playlists ADD COLUMN remote_key TEXT")?;
+        // 歌曲级 VIP 标记（网易云 fee / QQ 音乐 pay），老库补列默认 0
+        ensure_column(&conn, "tracks", "vip", "ALTER TABLE tracks ADD COLUMN vip INTEGER NOT NULL DEFAULT 0")?;
         // 旧版导入的 QQ 歌单封面是 300×300，播放页 / 高 DPI 屏上发糊。
         // 同 albummid 的 800×800 实测可用，直接把已入库的 URL 升一档：
         // 不用重新联网拉歌单，也不会产生第二份同名歌单。

@@ -9,6 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
 import Slider from "@/components/Slider.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import { LYRIC_VIS_EVENT, player as playerApi } from "@/api/ipc";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
@@ -161,7 +162,7 @@ onMounted(() => {
         class="mini-cover"
       />
       <div class="info" v-if="track">
-        <div class="t">{{ track.title }}</div>
+        <div class="t"><span class="nm">{{ track.title }}</span><VipBadge v-if="track.vip" :track="track" small /></div>
         <div class="a">
           {{ track.artist || "未知艺术家" }}
           <span
@@ -312,7 +313,10 @@ onMounted(() => {
   grid-template-columns: minmax(180px, 1fr) minmax(320px, 1.4fr) minmax(180px, 1fr);
   align-items: center;
   gap: 18px;
-  padding: 12px 20px;
+  /* 12px 上下时，中间控件区（控制 40 + 进度 18 + gap 2 = 60px）会超过
+     卡片减去 padding 的可用高度（78-24=54px），多出的 6px 向下溢出，
+     连带封面视觉偏下 4px。收到 9px：内容正好填满，封面真正垂直居中。 */
+  padding: 9px 20px;
   border-radius: var(--radius-l);
   backdrop-filter: blur(20px);
   background: color-mix(in srgb, var(--panel) 88%, transparent);
@@ -321,6 +325,8 @@ onMounted(() => {
 .left {
   display: flex;
   align-items: center;
+  /* 封面贴左（主流播放器习惯）。曾试过整组居中，但短歌名时左端会空出
+     一大片、文字顶到中间控制区，三段式反而失衡 —— 2026-11-11 回退。 */
   gap: 12px;
   min-width: 0;
   /* 点信息区进入「正在播放」（移动端是主要入口，桌面也保留这个习惯）；
@@ -338,8 +344,14 @@ onMounted(() => {
   min-width: 0;
 }
 .t {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 14px;
   font-weight: 600;
+  min-width: 0;
+}
+.t .nm {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -617,6 +629,8 @@ button.pill:hover {
     grid-row: 1;
     gap: 10px;
     min-width: 0;
+    /* 移动端这一列几乎占满整条、右边紧挨控制键，明确靠左。 */
+    justify-content: flex-start;
     cursor: pointer;
   }
   .left:active {

@@ -524,39 +524,62 @@ function requestImport(pluginId: string, meta: RemotePlaylistMeta) {
   void importCore(pluginId, meta.id, `「${meta.name}」`);
 }
 
-function confirmImport() {
+/** 覆盖 = 用云端最新内容更新已有歌单（保留 id/收藏关系/封面）；
+ *  新建 = 沿用旧行为，再建一份同名歌单。 */
+function confirmImport(mode: "overwrite" | "create") {
   const p = pendingImport.value;
   pendingImport.value = null;
-  if (p) void importCore(p.pluginId, p.cloudId, p.label);
+  // 链接导入命中重复时也会走这个弹窗，确认后输入框该清空
+  linkImport.text = "";
+  if (p) void importCore(p.pluginId, p.cloudId, p.label, mode);
 }
 
-/** 真正的导入：拉详情 → 先建本地歌单 → 写曲目 → 记封面 + remoteKey → 挂曲目。
- *  顺序是刻意的：歌单壳先落地，后面任何一步失败都能把它删掉回滚；
- *  反过来（先写曲目再建歌单）失败时曲目会永久留在库里，界面上又看不到。 */
-async function importCore(pluginId: string, cloudId: string, label: string) {
+/** 真正的导入：拉详情 → 建/找本地歌单 → 写曲目 → 记封面 + remoteKey → 挂曲目。
+ *  新建时歌单壳先落地，之后任何一步失败都能删掉回滚；
+ *  覆盖时找到 remoteKey 命中的已有歌单，只原子替换曲目关联，不新建重复歌单。 */
+async function importCore(
+  pluginId: string,
+  cloudId: string,
+  label: string,
+  mode: "create" | "overwrite" = "create",
+) {
   if (importing.value) return;
   importing.value = cloudId;
   try {
     const detail = await fetchCloudDetail(pluginId, cloudId, label);
     if (!detail) return;
-    const local = await playlistApi.create(detail.name);
+    const remoteKey = `${pluginId}:${cloudId}`;
+    const existing =
+      mode === "overwrite" ? library.playlists.find((p) => p.remoteKey === remoteKey) : undefined;
+    // 极端情况下 remoteKey 记录还在但本地歌单被删了：退回新建，别导入到半途报错
+    const local = existing ?? (await playlistApi.create(detail.name));
     try {
       await libraryApi.upsertTracks(detail.tracks);
       // 云端封面记到本地歌单上（侧栏缩略图 /「我的」页有图可看）
       if (detail.coverUrl) await playlistApi.setCover(local.id, detail.coverUrl);
-      await playlistApi.add(local.id, detail.tracks.map((t) => t.id));
+      const ids = detail.tracks.map((t) => t.id);
+      if (existing) {
+        // 一条命令里原子清空 + 重建，云端删掉的歌会从本地歌单移除
+        await playlistApi.replaceTracks(local.id, ids);
+      } else {
+        await playlistApi.add(local.id, ids);
+      }
       // remoteKey 最后写：它是「已导入过」的持久标记，只有曲目真的挂上去了才落，
       // 这样中途崩溃顶多留一个普通空歌单，不会变成「已导入但没有歌」的死状态
-      await playlistApi.setRemoteKey(local.id, `${pluginId}:${cloudId}`);
+      await playlistApi.setRemoteKey(local.id, remoteKey);
     } catch (e) {
-      // 回滚空壳歌单。已写入的曲目如果没挂上任何歌单，会在下次启动时
-      // 被孤儿清理回收（见 Db::open），这里不逐条删，避免误删用户已有曲目。
-      await playlistApi.remove(local.id).catch(() => {});
+      // 只回滚新建的空壳歌单；覆盖模式下原来的歌单必须保留，哪怕这次更新失败
+      if (!existing) await playlistApi.remove(local.id).catch(() => {});
       throw e;
     }
     // setCover / setRemoteKey 不触发 libraryChanged，主动刷一次
     await library.refresh();
-    ui.toast(`已导入「${detail.name}」${detail.tracks.length} 首到本地歌单`, "success");
+    ui.toast(
+      existing
+        ? `已覆盖「${detail.name}」为云端最新 ${detail.tracks.length} 首`
+        : `已导入「${detail.name}」${detail.tracks.length} 首到本地歌单`,
+      "success",
+    );
   } catch (e) {
     ui.toast(errorText(e), "error");
   } finally {
@@ -983,18 +1006,20 @@ onActivated(() => {
       </div>
     </Teleport>
 
-    <!-- 重复导入确认：本地已有该云端歌单的导入记录，再导会新建一份重复的 -->
+    <!-- 重复导入确认：本地已有该云端歌单的导入记录，可选覆盖已有歌单或新建重复歌单 -->
     <Teleport to="body">
       <div v-if="pendingImport" class="login-mask" @click.self="pendingImport = null">
         <div class="login-box confirm-box">
           <div class="login-title">再导入一次？</div>
           <p class="confirm-text">
             {{ pendingImport.label }} 已经导入过本地歌单了。
-            再次导入会<strong>新建一个重复的歌单</strong>，确定要继续吗？
+            选择<strong>覆盖歌单</strong>会用云端最新内容更新已有歌单（保留原歌单与收藏）；
+            或选择<strong>新建重复歌单</strong>再创建一份。
           </p>
-          <div class="login-actions">
+          <div class="login-actions confirm-choices">
             <button class="btn ghost" @click="pendingImport = null">取消</button>
-            <button class="btn primary" @click="confirmImport">仍然导入</button>
+            <button class="btn ghost" @click="confirmImport('create')">新建重复歌单</button>
+            <button class="btn primary" @click="confirmImport('overwrite')">覆盖歌单</button>
           </div>
         </div>
       </div>

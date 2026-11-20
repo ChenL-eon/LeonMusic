@@ -346,7 +346,8 @@ input {
   transform: scale(0.97);
 }
 .btn.primary {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  /* 纯色主按钮：不再用 accent → accent-2 的紫青渐变 */
+  background: var(--accent);
   color: #fff;
   box-shadow: 0 8px 24px -8px var(--accent);
 }

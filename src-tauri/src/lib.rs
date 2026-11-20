@@ -295,6 +295,7 @@ pub fn run() {
             commands::playlist_tracks,
             commands::playlist_add,
             commands::playlist_remove,
+            commands::playlist_replace_tracks,
             // net / misc
             commands::resolve_redirect,
             // plugin

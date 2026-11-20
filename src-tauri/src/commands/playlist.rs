@@ -64,3 +64,15 @@ pub fn playlist_remove(app: AppHandle, id: String, track_ids: Vec<String>) -> Ap
         .db
         .remove_from_playlist(&id, &track_ids)
 }
+
+/// 覆盖导入：原子替换歌单曲目，保留歌单本体/封面/remoteKey。
+#[tauri::command]
+pub fn playlist_replace_tracks(
+    app: AppHandle,
+    id: String,
+    track_ids: Vec<String>,
+) -> AppResult<()> {
+    app.state::<AppState>()
+        .db
+        .replace_playlist_tracks(&id, &track_ids)
+}

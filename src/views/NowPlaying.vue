@@ -10,6 +10,7 @@ import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
 import LyricView from "@/components/LyricView.vue";
 import Slider from "@/components/Slider.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useSettingsStore } from "@/stores/settings";
@@ -208,13 +209,16 @@ function menuAction(fn: () => void) {
         <CoverArt
           :cover-path="track?.coverPath"
           :cover-url="track?.coverUrl"
-          size="min(36vh, 300px)"
+          size="var(--cover-w)"
           radius="16px"
         />
       </div>
 
       <div class="meta">
-        <div class="title">{{ track?.title ?? "还没有播放" }}</div>
+        <div class="title">
+          {{ track?.title ?? "还没有播放" }}
+          <VipBadge v-if="track?.vip" :track="track" />
+        </div>
         <div class="artist">
           {{ track?.artist || "选择一首歌开始" }}
           <template v-if="track?.album"> · {{ track.album }}</template>
@@ -551,6 +555,9 @@ function menuAction(fn: () => void) {
 
 /* 左列：封面 → 信息 → 控制 → 进度，全部左对齐 */
 .stage {
+  /* 封面宽度只用一处定义：封面本身与下方进度条整行共用，改一处两边同步。
+     min(42vh, 360px) 与 CoverArt 原来的字面值一致。 */
+  --cover-w: min(42vh, 360px);
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -558,7 +565,10 @@ function menuAction(fn: () => void) {
   gap: 18px;
   position: relative;
   min-height: 0;
-  padding-left: clamp(4px, 3vw, 40px);
+  /* 整组（封面/标题/控制/进度）在左列内水平居中：左内距 = (列宽 - 封面宽) / 2。
+     align-items 仍是 flex-start，各元素左边缘统一落在这条居中基线上，
+     既把封面从贴左移到中间，又不破坏「进度条对齐封面」的上下关系。 */
+  padding-left: max(0px, calc((100% - var(--cover-w)) / 2));
 }
 
 .meta {
@@ -616,6 +626,11 @@ function menuAction(fn: () => void) {
   width: 52px;
   height: 52px;
   margin: 0 6px;
+  /* 全局 .icon-btn 自带 flex 居中，但 play-btn 没继承到；不显式居中
+     播放图标会贴按钮左沿（偏左 ~11px），导致上一首/播放/下一首间距不均 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text);
 }
 .now.has-bg .actions .play-btn {
@@ -663,8 +678,9 @@ function menuAction(fn: () => void) {
   display: flex;
   align-items: center;
   gap: 12px;
-  width: 100%;
-  max-width: 460px;
+  /* 与封面同宽、同左边缘：整行（含两端时间）右端正好收在封面右边缘，
+     进度条横条因此与封面卡片上下对齐，而不是宽出去一截。 */
+  width: var(--cover-w);
 }
 .progress {
   flex: 1;
@@ -681,8 +697,10 @@ function menuAction(fn: () => void) {
   width: 11px;
   height: 11px;
   opacity: 0.85;
-  transform: translate(-50%, -50%) scale(0.6);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  /* 阴影往下偏移会让圆点看着「挂」在轨道下方，改成居中扩散，
+     圆点与 5px 轨道的居中关系才清楚 */
+  transform: translate(-50%, -50%) scale(0.7);
+  box-shadow: 0 0 7px rgba(0, 0, 0, 0.45);
 }
 .progress:hover :deep(.track),
 .progress.dragging :deep(.track) {
@@ -900,9 +918,13 @@ function menuAction(fn: () => void) {
     gap: 14px;
   }
   .stage {
+    /* 横屏封面被强制缩到 104px，进度条宽度变量同步跟随，保持上下对齐 */
+    --cover-w: min(24vw, 104px);
     justify-content: center;
     gap: 7px;
     align-items: center;
+    /* 横屏各元素用 align-items:center 居中，不需要桌面的 padding 居中基line */
+    padding-left: 0;
   }
   .cover-wrap :deep(.cover) {
     width: min(24vw, 104px) !important;

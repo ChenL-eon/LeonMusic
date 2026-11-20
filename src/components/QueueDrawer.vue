@@ -3,6 +3,7 @@
 import { storeToRefs } from "pinia";
 
 import Icon from "@/components/Icon.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import { player as playerApi } from "@/api/ipc";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
@@ -68,7 +69,7 @@ async function move(from: number, to: number) {
       >
         <div class="idx mono">{{ i + 1 }}</div>
         <div class="meta">
-          <div class="t">{{ t.title }}</div>
+          <div class="t"><span class="nm">{{ t.title }}</span><VipBadge v-if="t.vip" :track="t" small /></div>
           <div class="a">{{ t.artist || "未知" }}</div>
         </div>
         <div class="dur mono">{{ fmt(t.durationMs) }}</div>
@@ -185,8 +186,14 @@ async function move(from: number, to: number) {
   min-width: 0;
 }
 .t {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12.5px;
   font-weight: 500;
+  min-width: 0;
+}
+.t .nm {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

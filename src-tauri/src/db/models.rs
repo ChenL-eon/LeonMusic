@@ -35,13 +35,14 @@ fn row_to_track(r: &Row<'_>) -> rusqlite::Result<Track> {
         bitrate: r.get::<_, Option<i64>>("bitrate")?.map(|v| v as u32),
         sample_rate: r.get::<_, Option<i64>>("sample_rate")?.map(|v| v as u32),
         channels: r.get::<_, Option<i64>>("channels")?.map(|v| v as u16),
+        vip: r.get::<_, i64>("vip")? != 0,
         added_at: r.get("added_at")?,
     })
 }
 
 const TRACK_COLS: &str = "id, source_kind, plugin_id, title, artist, album, duration_ms,
      cover_path, cover_url, file_path, plugin_track_id, format, bitrate, sample_rate,
-     channels, added_at";
+     channels, vip, added_at";
 
 impl Db {
     pub fn upsert_track(&self, t: &Track) -> AppResult<()> {
@@ -55,14 +56,15 @@ impl Db {
             c.execute(
                 "INSERT INTO tracks (id, source_kind, plugin_id, title, artist, album,
                     duration_ms, cover_path, cover_url, file_path, plugin_track_id, format,
-                    bitrate, sample_rate, channels, added_at, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+                    bitrate, sample_rate, channels, vip, added_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                  ON CONFLICT(id) DO UPDATE SET
                     title=excluded.title, artist=excluded.artist, album=excluded.album,
                     duration_ms=excluded.duration_ms, cover_path=excluded.cover_path,
                     cover_url=excluded.cover_url, file_path=excluded.file_path,
                     format=excluded.format, bitrate=excluded.bitrate,
                     sample_rate=excluded.sample_rate, channels=excluded.channels,
+                    vip=excluded.vip,
                     updated_at=excluded.updated_at",
                 params![
                     t.id,
@@ -80,6 +82,7 @@ impl Db {
                     t.bitrate.map(|v| v as i64),
                     t.sample_rate.map(|v| v as i64),
                     t.channels.map(|v| v as i64),
+                    t.vip,
                     t.added_at,
                     now
                 ],
@@ -130,14 +133,15 @@ impl Db {
                 tx.execute(
                     "INSERT INTO tracks (id, source_kind, plugin_id, title, artist, album,
                         duration_ms, cover_path, cover_url, file_path, plugin_track_id, format,
-                        bitrate, sample_rate, channels, added_at, updated_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+                        bitrate, sample_rate, channels, vip, added_at, updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                      ON CONFLICT(id) DO UPDATE SET
                         title=excluded.title, artist=excluded.artist, album=excluded.album,
                         duration_ms=excluded.duration_ms, cover_path=excluded.cover_path,
                         cover_url=excluded.cover_url, file_path=excluded.file_path,
                         format=excluded.format, bitrate=excluded.bitrate,
                         sample_rate=excluded.sample_rate, channels=excluded.channels,
+                        vip=excluded.vip,
                         updated_at=excluded.updated_at",
                     params![
                         t.id,
@@ -155,6 +159,7 @@ impl Db {
                         t.bitrate.map(|v| v as i64),
                         t.sample_rate.map(|v| v as i64),
                         t.channels.map(|v| v as i64),
+                        t.vip,
                         t.added_at,
                         now
                     ],
@@ -470,6 +475,46 @@ impl Db {
         })
     }
 
+    /// 原子替换歌单曲目：保留歌单本体（id / 名称 / 封面 / remoteKey / system 等字段），
+    /// 只清空并重建 `playlist_tracks` 关联。云端歌单「覆盖导入」用它把本地曲目
+    /// 换成最新云端列表，避免出现重复歌单；任一步失败整事务回滚。
+    pub fn replace_playlist_tracks(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> AppResult<()> {
+        self.tx(|tx| {
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM playlists WHERE id = ?1 AND system = 0",
+                    params![playlist_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !found {
+                return Err(AppError::invalid("playlist not found or is system playlist"));
+            }
+            let now = now_ms();
+            tx.execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+                params![playlist_id],
+            )?;
+            for (i, id) in track_ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![playlist_id, id, i as i64, now],
+                )?;
+            }
+            tx.execute(
+                "UPDATE playlists SET updated_at = ?2 WHERE id = ?1",
+                params![playlist_id, now],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn is_favorite(&self, track_id: &str) -> AppResult<bool> {
         self.with(|c| {
             let n: i64 = c.query_row(
@@ -758,6 +803,9 @@ pub struct Settings {
     ///
     /// 只影响「检测更新」走哪个接口、下载走哪个地址；两边的安装包内容一致。
     pub update_channel: String,
+    /// 启动时自动检测更新。默认开启；只做一次后台请求，失败静默，
+    /// 发现新版才提示，不打断启动流程。
+    pub auto_check_update: bool,
 }
 
 impl Default for Settings {
@@ -796,6 +844,7 @@ impl Default for Settings {
             cache_limit_mb: 2048,
             crossfade_ms: 0,
             update_channel: "cn".into(),
+            auto_check_update: true,
         }
     }
 }
@@ -844,8 +893,55 @@ mod tests {
             bitrate: None,
             sample_rate: None,
             channels: None,
+            vip: false,
             added_at: 0,
         }
+    }
+
+    #[test]
+    fn replace_playlist_tracks_keeps_playlist_but_swaps_tracks() {
+        let dir = std::env::temp_dir().join(format!(
+            "leonmusic-replace-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+
+        let pl = db.create_playlist("云端导入").unwrap();
+        let src = TrackSource::Plugin { plugin_id: "netease".into() };
+        for id in ["netease:old1", "netease:old2", "netease:keep"] {
+            db.upsert_track(&make_track(id, src.clone(), None)).unwrap();
+        }
+        db.upsert_track(&make_track("netease:new", src.clone(), None)).unwrap();
+        db.add_to_playlist(
+            &pl.id,
+            &["netease:old1".into(), "netease:old2".into(), "netease:keep".into()],
+        )
+        .unwrap();
+        db.set_playlist_cover_url(&pl.id, Some("https://example.com/c.jpg"))
+            .unwrap();
+        db.set_playlist_remote_key(&pl.id, Some("netease:123")).unwrap();
+
+        // 云端现在只剩 keep + new，覆盖后本地必须精确同步（顺序也跟云端一致）
+        db.replace_playlist_tracks(&pl.id, &["netease:new".into(), "netease:keep".into()])
+            .unwrap();
+        let ids: Vec<String> = db.playlist_tracks(&pl.id).unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["netease:new", "netease:keep"]);
+
+        let after = db.list_playlists().unwrap().into_iter().find(|p| p.id == pl.id).unwrap();
+        assert_eq!(after.name, "云端导入", "歌单名保留");
+        assert_eq!(after.remote_key.as_deref(), Some("netease:123"), "remoteKey 保留");
+        assert_eq!(after.cover_url.as_deref(), Some("https://example.com/c.jpg"), "封面保留");
+
+        // 系统歌单不允许被覆盖，也不应误伤它的曲目
+        assert!(db.replace_playlist_tracks("favorites", &["netease:new".into()]).is_err());
+        assert_eq!(db.playlist_tracks("favorites").unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -922,6 +1018,26 @@ mod tests {
         // 回写时新字段要出现在 JSON 里，前端才能读到
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["rememberSearchSource"], true);
+    }
+
+    #[test]
+    fn auto_check_update_defaults_to_on_for_existing_installs() {
+        // 和 rememberSearchSource 同理：老存档没有这个键，结构体级
+        // #[serde(default)] 必须给 true，否则升级后自动检测凭空关闭。
+        assert!(Settings::default().auto_check_update);
+        let legacy = serde_json::json!({
+            "theme": "dark",
+            "updateChannel": "global"
+        });
+        let s: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(s.auto_check_update, "旧存档按默认开启处理");
+        assert_eq!(s.update_channel, "global", "已有字段不被默认值覆盖");
+        // 用户关掉后要能持久化：回写的 JSON 里必须是 false
+        let off: Settings =
+            serde_json::from_value(serde_json::json!({ "autoCheckUpdate": false })).unwrap();
+        assert!(!off.auto_check_update);
+        let json = serde_json::to_value(&off).unwrap();
+        assert_eq!(json["autoCheckUpdate"], false);
     }
 
     #[test]

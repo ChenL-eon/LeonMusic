@@ -18,6 +18,13 @@ import type { AudioDiag, PluginInfo } from "@/types";
 import type { UpdateProgress } from "@/api/ipc";
 import { STREAM_PLUGIN_IDS, applyBgOpacityVars, useSettingsStore } from "@/stores/settings";
 import { useUiStore } from "@/stores/ui";
+import {
+  CHANNELS,
+  autoCheckResult,
+  checkRelease,
+  type Channel,
+  type ReleaseInfo,
+} from "@/utils/updateCheck";
 
 const store = useSettingsStore();
 const ui = useUiStore();
@@ -28,6 +35,17 @@ const tab = computed({
 });
 const pluginDraft = reactive<Record<string, Record<string, string>>>({});
 const busy = ref(false);
+
+/** 插件卡片默认收起：内置音源那一大段说明（含免责声明）和若干配置项
+ *  会把音源页撑到两三屏，平时只需要「名称 + 版本 + 总开关」。
+ *  展开状态只活在当前页面里，重进设置页回到全收起，符合「默认收起」。 */
+const expandedPlugins = reactive<Record<string, boolean>>({});
+function isPluginExpanded(id: string): boolean {
+  return !!expandedPlugins[id];
+}
+function togglePluginCard(id: string): void {
+  expandedPlugins[id] = !expandedPlugins[id];
+}
 
 // ---------------------------------------------------------------------------
 // 音频输出自检
@@ -572,7 +590,7 @@ function installPlugin() {
 //
 // 两条渠道：国内走 Gitee、国外走 GitHub。发行版对象的字段一致
 // （tag_name / body / assets），差别只在接口形态：GitHub 有 /latest，
-// Gitee 只能拿列表自己挑最新的正式版（见 pickRelease）。
+// Gitee 只能拿列表自己挑最新的正式版（见 @/utils/updateCheck.ts 的 pickRelease）。
 //
 // 应用内升级不跳浏览器：
 //   Windows —— 下载便携包里的 exe，退出后由外部小进程替换并重启；
@@ -580,39 +598,6 @@ function installPlugin() {
 // 平台 / 架构不匹配时（例如以后出别的构建）只保留「下载页」入口。
 // ---------------------------------------------------------------------------
 
-interface ReleaseAsset {
-  name: string;
-  url: string;
-}
-
-interface ReleaseInfo {
-  tag: string;
-  notes: string;
-  /** 发行版网页地址：应用内升级不可用时作为兜底 */
-  page: string;
-  /** 当前平台能用的安装包；为 null 时只能去下载页 */
-  asset: ReleaseAsset | null;
-}
-
-const CHANNELS = {
-  cn: {
-    name: "国内",
-    host: "Gitee",
-    api: "https://gitee.com/api/v5/repos/byging/leon-music-releases/releases?per_page=20",
-    page: "https://gitee.com/byging/leon-music-releases/releases",
-    // Gitee 的 /releases/latest 不排除预览版，用列表接口自己挑正式版
-    list: true,
-  },
-  global: {
-    name: "国外",
-    host: "GitHub",
-    api: "https://api.github.com/repos/ChenL-eon/LeonMusic/releases/latest",
-    page: "https://github.com/ChenL-eon/LeonMusic/releases",
-    list: false,
-  },
-} as const;
-
-type Channel = keyof typeof CHANNELS;
 const channelList = (Object.keys(CHANNELS) as Channel[]).map((id) => ({ id, ...CHANNELS[id] }));
 
 const channel = computed<Channel>(() => (s.value.updateChannel === "global" ? "global" : "cn"));
@@ -650,71 +635,8 @@ function fmtBytes(n: number): string {
   return `${n} B`;
 }
 
-/** 三段数字版本比较（v 前缀容忍）；返回 <0 / 0 / >0。非法段按 0。 */
-function cmpVersion(a: string, b: string): number {
-  const pa = a.replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = b.replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d) return d;
-  }
-  return 0;
-}
-
-/** release notes 的轻量净化：剥 markdown 标记、截断到一屏内。 */
-function cleanNotes(body: string): string {
-  return body
-    .replace(/^#+\s/gm, "")
-    .replace(/\*\*/g, "")
-    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
-    .trim()
-    .slice(0, 800);
-}
-
-/** 从发行版附件里挑当前平台要的那一个。
- *
- *  Windows 用便携包 zip（解出 exe 直接替换，不写注册表、不需要管理员）；
- *  Android 用 arm64 APK。Gitee 还会把源码 zip 一起放进 assets，
- *  所以必须按文件名后缀精确匹配，不能取第一个。 */
-function pickAsset(assets: unknown, kind: string): ReleaseAsset | null {
-  const list = Array.isArray(assets) ? assets : [];
-  const match = (re: RegExp): ReleaseAsset | null => {
-    for (const raw of list) {
-      const a = raw as { name?: unknown; browser_download_url?: unknown };
-      const name = typeof a?.name === "string" ? a.name : "";
-      const url = typeof a?.browser_download_url === "string" ? a.browser_download_url : "";
-      if (url && re.test(name)) return { name, url };
-    }
-    return null;
-  };
-  if (kind === "android") return match(/android.*\.apk$/i);
-  if (kind === "windows") return match(/windows.*-portable\.zip$/i);
-  return null;
-}
-
-/** 把两种接口的响应归一成一个发行版对象。
- *
- *  GitHub：`/releases/latest` 直接给对象，且已排除草稿与预览版；
- *  Gitee：只有列表接口可用，顺序不保证、也不排除预览版 —— 这里按创建时间
- *  倒序挑最新的**正式版**，避免把 v1.4.0-beta 推给所有稳定版用户。
- *
- *  两家对「还没有发行版」的形态也不一样（404 / 200+null / 空数组），
- *  所以调用方不能只看 `resp.ok`。 */
-function pickRelease(payload: unknown, list: boolean): Record<string, unknown> | null {
-  const isObj = (v: unknown): v is Record<string, unknown> =>
-    !!v && typeof v === "object" && !Array.isArray(v);
-  if (!list) return isObj(payload) ? payload : null;
-
-  const ts = (v: unknown) => {
-    const n = Date.parse(String(v ?? ""));
-    return Number.isFinite(n) ? n : 0;
-  };
-  const stable = (Array.isArray(payload) ? payload : [])
-    .filter(isObj)
-    .filter((r) => !r.prerelease && typeof r.tag_name === "string")
-    .sort((a, b) => ts(b.created_at) - ts(a.created_at));
-  return stable[0] ?? null;
-}
+/* 版本比较 / 附件筛选 / 两家接口归一都收在 @/utils/updateCheck.ts：
+   启动时自动检测（App.vue）与本页手动检测共用同一份实现，不会各写一套。 */
 
 /** 每次检测递增：切渠道时上一个请求可能还在路上，
  *  回来晚了就丢掉——否则「国外」的结果会覆盖刚切到的「国内」。 */
@@ -734,7 +656,6 @@ async function setChannel(c: Channel) {
 
 async function checkUpdate() {
   if (updBusy.value) return;
-  const ch = channelInfo.value;
   const seq = ++checkSeq;
   updState.value = "checking";
   updError.value = "";
@@ -742,51 +663,24 @@ async function checkUpdate() {
   latest.value = null;
 
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15000);
-    let resp: Response;
-    try {
-      resp = await fetch(ch.api, {
-        signal: ctrl.signal,
-        cache: "no-store",
-        headers: { Accept: "application/json" },
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    const outcome = await checkRelease({
+      channel: channel.value,
+      platformKind: platformKind.value,
+      appVersion: appVersion.value,
+    });
     if (seq !== checkSeq) return;
-
-    if (resp.status === 404) throw new Error(`该渠道还没有发布过版本，可稍后再试`);
-    if (resp.status === 403) throw new Error(`${ch.host} 接口限流，请稍后再试`);
-    if (!resp.ok) throw new Error(`接口返回 HTTP ${resp.status}`);
-
-    const payload = (await resp.json()) as unknown;
-    if (seq !== checkSeq) return;
-    const data = pickRelease(payload, ch.list);
-    if (!data) throw new Error("该渠道还没有发布过正式版本，可稍后再试");
-
-    const tag = typeof data.tag_name === "string" ? data.tag_name.trim() : "";
-    if (!tag) throw new Error("接口响应里没有版本号");
-
-    if (cmpVersion(tag, appVersion.value || "0.0.0") <= 0) {
+    if (outcome.kind === "latest") {
       updState.value = "latest";
       return;
     }
-
-    const notes = typeof data.body === "string" ? data.body : "";
-    const page = typeof data.html_url === "string" ? data.html_url : ch.page;
-    latest.value = {
-      tag,
-      notes: cleanNotes(notes),
-      page,
-      asset: pickAsset(data.assets, platformKind.value),
-    };
+    latest.value = outcome.release;
     updState.value = "available";
   } catch (e) {
     if (seq !== checkSeq) return;
     updState.value = "error";
+    const host = channelInfo.value.host;
     if (e instanceof Error && e.name === "AbortError") {
-      updError.value = `${ch.host} 连接超时，请检查网络后重试`;
+      updError.value = `${host} 连接超时，请检查网络后重试`;
     } else if (e instanceof Error && /^[\x20-\x7e]+$/.test(e.message)) {
       // fetch 自己抛的英文错误（Failed to fetch 等）补一层上下文
       updError.value = `检测失败：${e.message.slice(0, 80)}`;
@@ -796,6 +690,28 @@ async function checkUpdate() {
       updError.value = "检测失败，请稍后重试";
     }
   }
+}
+
+/**
+ * 启动时自动检测的结果直接复用，用户看到提示后点进设置页就能「立即更新」，
+ * 不必再手动点一次检测。只在 idle 时消费，不覆盖正在进行的下载/手动检测。
+ */
+function consumeAutoCheck(): void {
+  const cached = autoCheckResult.value;
+  if (!cached || Date.now() - cached.at > 10 * 60 * 1000) return;
+  if (cached.channel !== channel.value || updState.value !== "idle") return;
+  if (cached.outcome.kind === "available") {
+    latest.value = cached.outcome.release;
+    updState.value = "available";
+  } else {
+    updState.value = "latest";
+  }
+}
+watch(autoCheckResult, consumeAutoCheck);
+
+const GITHUB_REPO_URL = "https://github.com/ChenL-eon/LeonMusic";
+function openGitHub() {
+  void appApi.openExternal(GITHUB_REPO_URL).catch((e) => ui.toast(errorText(e), "error"));
 }
 
 async function startUpdate() {
@@ -860,6 +776,8 @@ onMounted(async () => {
     got.value = p.downloaded;
     total.value = p.total;
   });
+  // 启动检测可能比本页挂载更早完成；晚到的结果由上面的 watch 接住
+  consumeAutoCheck();
 });
 
 onBeforeUnmount(() => {
@@ -1512,13 +1430,22 @@ onBeforeUnmount(() => {
 
           <div v-for="p in sourcePlugins" :key="p.manifest.id" class="plugin card">
             <div class="plugin-head">
-              <div class="plugin-title">
+              <button
+                class="plugin-toggle"
+                :class="{ open: isPluginExpanded(p.manifest.id) }"
+                :aria-expanded="isPluginExpanded(p.manifest.id)"
+                :aria-label="isPluginExpanded(p.manifest.id) ? '收起插件详情' : '展开插件详情'"
+                @click="togglePluginCard(p.manifest.id)"
+              >
+                <Icon name="chevron" :size="16" />
+              </button>
+              <div class="plugin-title" @click="togglePluginCard(p.manifest.id)">
                 <Icon name="plug" :size="17" />
                 <strong>{{ p.manifest.name }}</strong>
                 <span class="ver">v{{ p.manifest.version }}</span>
                 <span v-if="p.builtin" class="badge">内置</span>
               </div>
-              <label class="switch">
+              <label class="switch" @click.stop>
                 <input
                   type="checkbox"
                   :checked="p.enabled"
@@ -1527,34 +1454,36 @@ onBeforeUnmount(() => {
                 <span />
               </label>
             </div>
-            <p class="plugin-desc">{{ p.manifest.description }}</p>
+            <div v-if="isPluginExpanded(p.manifest.id)" class="plugin-body">
+              <p class="plugin-desc">{{ p.manifest.description }}</p>
 
-            <div v-if="configFields(p).length" class="fields">
-              <div v-for="f in configFields(p)" :key="f.key" class="field">
-                <label>{{ f.label }}<span v-if="f.required" class="req">*</span></label>
-                <div v-if="f.fieldType === 'boolean'" class="bool-row">
-                  <label class="switch">
-                    <input
-                      type="checkbox"
-                      :checked="pluginDraft[p.manifest.id][f.key] !== 'off'"
-                      @change="
-                        pluginDraft[p.manifest.id][f.key] = ($event.target as HTMLInputElement).checked
-                          ? 'on'
-                          : 'off'
-                      "
-                    />
-                    <span />
-                  </label>
-                  <span class="bool-hint">{{ f.placeholder }}</span>
+              <div v-if="configFields(p).length" class="fields">
+                <div v-for="f in configFields(p)" :key="f.key" class="field">
+                  <label>{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+                  <div v-if="f.fieldType === 'boolean'" class="bool-row">
+                    <label class="switch">
+                      <input
+                        type="checkbox"
+                        :checked="pluginDraft[p.manifest.id][f.key] !== 'off'"
+                        @change="
+                          pluginDraft[p.manifest.id][f.key] = ($event.target as HTMLInputElement).checked
+                            ? 'on'
+                            : 'off'
+                        "
+                      />
+                      <span />
+                    </label>
+                    <span class="bool-hint">{{ f.placeholder }}</span>
+                  </div>
+                  <input
+                    v-else
+                    v-model="pluginDraft[p.manifest.id][f.key]"
+                    :placeholder="f.placeholder ?? ''"
+                    :type="f.fieldType === 'password' ? 'password' : 'text'"
+                  />
                 </div>
-                <input
-                  v-else
-                  v-model="pluginDraft[p.manifest.id][f.key]"
-                  :placeholder="f.placeholder ?? ''"
-                  :type="f.fieldType === 'password' ? 'password' : 'text'"
-                />
+                <button class="btn primary" @click="savePlugin(p.manifest.id)">保存配置</button>
               </div>
-              <button class="btn primary" @click="savePlugin(p.manifest.id)">保存配置</button>
             </div>
           </div>
 
@@ -1604,14 +1533,23 @@ onBeforeUnmount(() => {
           <template v-else>
             <div v-for="p in streamPlugins" :key="p.manifest.id" class="plugin card">
               <div class="plugin-head">
-                <div class="plugin-title">
+                <button
+                  class="plugin-toggle"
+                  :class="{ open: isPluginExpanded(p.manifest.id) }"
+                  :aria-expanded="isPluginExpanded(p.manifest.id)"
+                  :aria-label="isPluginExpanded(p.manifest.id) ? '收起插件详情' : '展开插件详情'"
+                  @click="togglePluginCard(p.manifest.id)"
+                >
+                  <Icon name="chevron" :size="16" />
+                </button>
+                <div class="plugin-title" @click="togglePluginCard(p.manifest.id)">
                   <Icon name="plug" :size="17" />
                   <strong>{{ p.manifest.name }}</strong>
                   <span class="badge" :class="{ ok: p.enabled }">
                     {{ p.enabled ? "已启用" : isConfigured(p) ? "已配置" : "待配置" }}
                   </span>
                 </div>
-                <label class="switch">
+                <label class="switch" @click.stop>
                   <input
                     type="checkbox"
                     :checked="p.enabled"
@@ -1620,37 +1558,39 @@ onBeforeUnmount(() => {
                   <span />
                 </label>
               </div>
-              <p class="plugin-desc">{{ p.manifest.description }}</p>
+              <div v-if="isPluginExpanded(p.manifest.id)" class="plugin-body">
+                <p class="plugin-desc">{{ p.manifest.description }}</p>
 
-              <div v-if="configFields(p).length && pluginDraft[p.manifest.id]" class="fields">
-                <div v-for="f in configFields(p)" :key="f.key" class="field">
-                  <label>{{ f.label }}<span v-if="f.required" class="req">*</span></label>
-                  <div v-if="f.fieldType === 'boolean'" class="bool-row">
-                    <label class="switch">
-                      <input
-                        type="checkbox"
-                        :checked="pluginDraft[p.manifest.id][f.key] !== 'off'"
-                        @change="
-                          pluginDraft[p.manifest.id][f.key] = (
-                            $event.target as HTMLInputElement
-                          ).checked
-                            ? 'on'
-                            : 'off'
-                        "
-                      />
-                      <span />
-                    </label>
-                    <span class="bool-hint">{{ f.placeholder }}</span>
+                <div v-if="configFields(p).length && pluginDraft[p.manifest.id]" class="fields">
+                  <div v-for="f in configFields(p)" :key="f.key" class="field">
+                    <label>{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+                    <div v-if="f.fieldType === 'boolean'" class="bool-row">
+                      <label class="switch">
+                        <input
+                          type="checkbox"
+                          :checked="pluginDraft[p.manifest.id][f.key] !== 'off'"
+                          @change="
+                            pluginDraft[p.manifest.id][f.key] = (
+                              $event.target as HTMLInputElement
+                            ).checked
+                              ? 'on'
+                              : 'off'
+                          "
+                        />
+                        <span />
+                      </label>
+                      <span class="bool-hint">{{ f.placeholder }}</span>
+                    </div>
+                    <input
+                      v-else
+                      v-model="pluginDraft[p.manifest.id][f.key]"
+                      :placeholder="f.placeholder ?? ''"
+                      :type="f.fieldType === 'password' ? 'password' : 'text'"
+                      spellcheck="false"
+                    />
                   </div>
-                  <input
-                    v-else
-                    v-model="pluginDraft[p.manifest.id][f.key]"
-                    :placeholder="f.placeholder ?? ''"
-                    :type="f.fieldType === 'password' ? 'password' : 'text'"
-                    spellcheck="false"
-                  />
+                  <button class="btn primary" @click="savePlugin(p.manifest.id)">保存配置</button>
                 </div>
-                <button class="btn primary" @click="savePlugin(p.manifest.id)">保存配置</button>
               </div>
             </div>
 
@@ -1663,13 +1603,23 @@ onBeforeUnmount(() => {
         <!-- 更新与关于 -->
         <section v-else class="group">
           <div class="about">
-            <div class="logo-big">
-              <BrandLogo :size="58" />
+            <div class="about-left">
+              <div class="logo-big">
+                <BrandLogo :size="58" />
+              </div>
+              <div class="about-info">
+                <div class="about-title">
+                  LeonMusic <span class="ver">{{ appVersion || "0.1.0" }}</span>
+                </div>
+                <div class="desc">Tauri v2 · Rust 音频内核 · Vue 3</div>
+              </div>
             </div>
-            <div>
-              <div class="about-title">LeonMusic <span class="ver">{{ appVersion || "0.1.0" }}</span></div>
-              <div class="desc">Tauri v2 · Rust 音频内核 · Vue 3</div>
-            </div>
+            <button class="gh-btn" title="在 GitHub 上查看项目" @click="openGitHub">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 014 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
+              </svg>
+              <span>GitHub</span>
+            </button>
           </div>
 
           <!-- 检测更新 -->
@@ -1703,6 +1653,23 @@ onBeforeUnmount(() => {
               >
                 {{ c.name }}<span class="host">{{ c.host }}</span>
               </button>
+            </div>
+
+            <!-- 启动自动检测：默认开启。只做一次后台请求，失败静默，
+                 发现新版才提示，不打断首屏加载。 -->
+            <div class="upd-auto">
+              <div class="label">
+                <div>启动时自动检测</div>
+                <div class="desc">打开软件时在后台检查新版，仅在发现更新时提示</div>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="s.autoCheckUpdate !== false"
+                  @change="set('autoCheckUpdate', ($event.target as HTMLInputElement).checked)"
+                />
+                <span />
+              </label>
             </div>
 
             <div v-if="updState === 'latest'" class="upd-result ok">
@@ -2224,12 +2191,44 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
+}
+/* 折叠箭头：默认收起时指向右，展开后顺时针转 90° 指向下 */
+.plugin-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: transform 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+.plugin-toggle:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.plugin-toggle.open {
+  transform: rotate(90deg);
+  color: var(--accent);
 }
 .plugin-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
   font-size: 14px;
+  cursor: pointer;
+}
+.plugin-body {
+  padding-top: 2px;
 }
 .ver {
   font-size: 10.5px;
@@ -2352,17 +2351,56 @@ input[type="range"]::-webkit-slider-thumb {
 .about {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   padding: 10px 16px 22px;
+}
+.about-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 .logo-big {
   width: 58px;
   height: 58px;
+  flex: none;
   filter: drop-shadow(0 10px 18px rgba(119, 69, 250, 0.4));
+}
+.about-info {
+  min-width: 0;
 }
 .about-title {
   font-size: 19px;
   font-weight: 700;
+}
+/* GitHub 跳转：参考 KA Music 的描边胶囊按钮（猫图标 + 文字），右侧对齐 */
+.gh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-3);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.gh-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+.gh-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+.gh-btn:active {
+  transform: scale(0.97);
 }
 .kv {
   display: flex;
@@ -2406,6 +2444,15 @@ input[type="range"]::-webkit-slider-thumb {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+.upd-auto {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 .upd-result {
   margin-top: 10px;

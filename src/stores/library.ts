@@ -195,6 +195,61 @@ export const useLibraryStore = defineStore("library", () => {
     return p;
   }
 
+  /** 重命名歌单（前端入口；后端 rename_playlist 拒系统歌单）。
+   *  本地 active 若是它，名字也跟着刷新，免得详情页头还是旧名。 */
+  async function renamePlaylist(id: string, name: string) {
+    await playlistApi.rename(id, name);
+    playlists.value = await playlistApi.list();
+    if (activePlaylist.value?.id === id) {
+      activePlaylist.value = playlists.value.find((p) => p.id === id) ?? null;
+    }
+  }
+
+  /** 更新云端歌单：按 remoteKey（pluginId:cloudId）重新拉云端曲目，
+   *  按云端顺序原子重建本地曲目（与「覆盖导入」同一条路径），再更新封面。
+   *  返回新增/移除数量供 UI 提示；无 remoteKey 的本地歌单返回 null。 */
+  async function updatePlaylist(
+    id: string,
+  ): Promise<{ added: number; removed: number; total: number } | null> {
+    const p = playlists.value.find((x) => x.id === id);
+    if (!p?.remoteKey) return null;
+    const sep = p.remoteKey.indexOf(":");
+    if (sep <= 0) return null;
+    const pluginId = p.remoteKey.slice(0, sep);
+    const cloudId = p.remoteKey.slice(sep + 1);
+
+    const detail = await pluginApi.cloudPlaylist(pluginId, cloudId);
+    if (!detail.tracks.length) throw new Error("云端歌单没有拿到曲目");
+
+    // 先写元数据，播放时才能按 id 解析到流；这一步会发 library_changed
+    await library.upsertTracks(detail.tracks);
+
+    const local = await playlistApi.tracks(id);
+    const localIds = new Set(local.map((t) => t.id));
+    const cloudIds = new Set(detail.tracks.map((t) => t.id));
+    const added = detail.tracks.filter((t) => !localIds.has(t.id)).length;
+    const removed = local.filter((t) => !cloudIds.has(t.id)).length;
+
+    // 按云端顺序原子重建整张歌单。差量 add 会把新歌追加到末尾，
+    // 云端调整过曲目顺序时本地就对不上；replaceTracks 与覆盖导入同一路径，
+    // 保证「更新歌单」和「覆盖导入」得到完全一致的顺序。
+    await playlistApi.replaceTracks(
+      id,
+      detail.tracks.map((t) => t.id),
+    );
+    if (detail.coverUrl && detail.coverUrl !== p.coverUrl) {
+      await playlistApi.setCover(id, detail.coverUrl);
+    }
+
+    // 命令层不发 library_changed，主动刷新；若当前打开的就是它，曲目也重读
+    playlists.value = await playlistApi.list();
+    if (activePlaylist.value?.id === id) {
+      activePlaylist.value = playlists.value.find((x) => x.id === id) ?? null;
+      playlistTracks.value = await playlistApi.tracks(id);
+    }
+    return { added, removed, total: detail.tracks.length };
+  }
+
   async function deletePlaylist(id: string) {
     await playlistApi.remove(id);
     if (activePlaylist.value?.id === id) {
@@ -235,6 +290,8 @@ export const useLibraryStore = defineStore("library", () => {
     toggleFavoriteTrack,
     openPlaylist,
     createPlaylist,
+    renamePlaylist,
+    updatePlaylist,
     deletePlaylist,
     addToPlaylist,
   };

@@ -30,6 +30,8 @@ export interface Track {
   bitrate?: number | null;
   sampleRate?: number | null;
   channels?: number | null;
+  /** 平台会员专享曲目（网易云 fee / QQ 音乐 pay），歌名后显示 VIP 标 */
+  vip?: boolean;
   addedAt: number;
   /** 本次解析实际请求的档位（智能音质降级重试时由 Rust 填入，普通播放不出现） */
   qualityHint?: string;
@@ -305,6 +307,8 @@ export interface Settings {
   crossfadeMs: number;
   /** 更新渠道：cn = 国内（Gitee，默认），global = 国外（GitHub） */
   updateChannel: "cn" | "global";
+  /** 启动时自动检测更新：默认开启，只做后台请求、发现新版才提示 */
+  autoCheckUpdate: boolean;
 }
 
 export interface PlatformInfo {

@@ -7,6 +7,7 @@ import { storeToRefs } from "pinia";
 import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
 import Slider from "@/components/Slider.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import { useLibraryStore } from "@/stores/library";
 import { usePlayerStore } from "@/stores/player";
 import { useUiStore } from "@/stores/ui";
@@ -115,7 +116,7 @@ function onTouchEnd(e: TouchEvent) {
           <Icon name="chevron-down" :size="24" />
         </button>
         <div class="titles">
-          <b>{{ track?.title ?? "还没有播放" }}</b>
+          <b class="tn"><span>{{ track?.title ?? "还没有播放" }}</span><VipBadge v-if="track?.vip" :track="track" small /></b>
           <small>{{ track?.artist || "从本地音乐挑一首开始" }}</small>
         </div>
         <div class="acts">
@@ -313,6 +314,17 @@ function onTouchEnd(e: TouchEvent) {
   gap: 3px;
   padding-left: var(--cover-x);
   text-align: left;
+}
+.titles b.tn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.titles b.tn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .titles b {
   font-size: 15px;

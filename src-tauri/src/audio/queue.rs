@@ -280,6 +280,7 @@ mod tests {
             bitrate: None,
             sample_rate: None,
             channels: None,
+            vip: false,
             added_at: 0,
         }
     }

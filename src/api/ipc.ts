@@ -140,6 +140,9 @@ export const playlist = {
   add: (id: string, trackIds: string[]) => invoke<void>("playlist_add", { id, trackIds }),
   removeTracks: (id: string, trackIds: string[]) =>
     invoke<void>("playlist_remove", { id, trackIds }),
+  /** 覆盖导入：原子替换歌单曲目，保留歌单本体/封面/remoteKey */
+  replaceTracks: (id: string, trackIds: string[]) =>
+    invoke<void>("playlist_replace_tracks", { id, trackIds }),
 };
 
 export const plugins = {

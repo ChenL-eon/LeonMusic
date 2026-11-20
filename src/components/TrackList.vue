@@ -7,6 +7,7 @@ import { computed } from "vue";
 
 import CoverArt from "@/components/CoverArt.vue";
 import Icon from "@/components/Icon.vue";
+import VipBadge from "@/components/VipBadge.vue";
 import type { Track } from "@/types";
 
 const props = withDefaults(
@@ -84,6 +85,7 @@ function onRowClick(t: Track, i: number) {
       <div class="meta">
         <div class="title">
           {{ t.title }}
+          <VipBadge v-if="t.vip" :track="t" small />
           <span v-if="t.source.kind === 'plugin'" class="badge">{{ t.source.pluginId }}</span>
         </div>
         <div class="sub">{{ t.artist || "未知艺术家" }}<template v-if="t.album"> · {{ t.album }}</template></div>

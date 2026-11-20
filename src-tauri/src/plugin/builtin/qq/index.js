@@ -96,6 +96,15 @@ function singerNames(list) {
   return out.join('/');
 }
 
+/** 歌曲级 VIP 标记：musicu 的 pay.pay_month / pay.pay_play，
+ *  与 client_search_cp 的 pay.paytrackmouth / pay.payplay 字段名不同，兼容两者。
+ *  与 netease 插件里的 isQqVip 保持一致（插件间不共享代码）。 */
+function isQqVip(pay) {
+  if (!pay) return false;
+  return Number(pay.pay_month || pay.paytrackmouth || 0) > 0 ||
+    Number(pay.pay_play || pay.payplay || 0) > 0;
+}
+
 // ---------------------------------------------------------------------------
 // QQ 官方接口
 // ---------------------------------------------------------------------------
@@ -150,7 +159,8 @@ function qqSearchMusicu(keyword, page, size) {
       artist: singerNames(s.singer),
       album: al.name || '',
       durationMs: (Number(s.interval) || 0) * 1000,
-      coverUrl: coverUrl(al.mid || al.pmid)
+      coverUrl: coverUrl(al.mid || al.pmid),
+      vip: isQqVip(s.pay)
     });
   }
   return { ok: true, list: out };
@@ -187,7 +197,8 @@ function qqSearchFallback(keyword, page, size) {
       artist: singerNames(s.singer),
       album: s.albumname || '',
       durationMs: (Number(s.interval) || 0) * 1000,
-      coverUrl: coverUrl(s.albummid)
+      coverUrl: coverUrl(s.albummid),
+      vip: isQqVip(s.pay)
     });
   }
   return out;

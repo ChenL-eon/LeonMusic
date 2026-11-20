@@ -104,6 +104,7 @@ pub fn read_track(path: &Path) -> AppResult<ScannedTrack> {
         bitrate: None,
         sample_rate: None,
         channels: None,
+        vip: false,
         added_at: chrono::Utc::now().timestamp_millis(),
     };
 
