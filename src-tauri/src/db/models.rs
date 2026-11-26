@@ -247,7 +247,10 @@ impl Db {
             let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
             if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
-                sql.push_str(" AND (title LIKE ?1 OR artist LIKE ?2 OR album LIKE ?3)");
+                // 匿名占位符：绑定顺序即占位符顺序。写死 ?1/?4 会在
+                // 「无关键词 + 插件筛选」时只绑 1 个参数却引用 ?4，
+                // 触发 InvalidParameterCount（LM-10）。
+                sql.push_str(" AND (title LIKE ? OR artist LIKE ? OR album LIKE ?)");
                 let like = format!("%{}%", q.trim());
                 args.push(Box::new(like.clone()));
                 args.push(Box::new(like.clone()));
@@ -257,7 +260,7 @@ impl Db {
                 if s == "local" {
                     sql.push_str(" AND source_kind = 'local'");
                 } else if s != "all" {
-                    sql.push_str(" AND plugin_id = ?4");
+                    sql.push_str(" AND plugin_id = ?");
                     args.push(Box::new(s.to_string()));
                 }
             }
@@ -272,6 +275,35 @@ impl Db {
             for r in rows {
                 out.push(r?);
             }
+            Ok(out)
+        })
+    }
+
+    /// 已缓存到本地的在线曲目（流式落盘完成、`file_path` 已回填）。
+    ///
+    /// 只认文件**真实存在**的记录：LRU 淘汰、手动清缓存、外部删文件之后
+    /// `file_path` 可能还留在库里，直接信它会列出已经不存在的曲目。
+    /// 本地导入的曲目有 file_path 但不是「缓存」，按 `source_kind='plugin'` 排除。
+    pub fn cached_tracks(&self, limit: i64) -> AppResult<Vec<Track>> {
+        self.with(|c| {
+            let mut stmt = c.prepare(&format!(
+                "SELECT {TRACK_COLS} FROM tracks
+                 WHERE source_kind = 'plugin'
+                   AND file_path IS NOT NULL AND file_path <> ''
+                 ORDER BY added_at DESC, id"
+            ))?;
+            let rows = stmt.query_map([], row_to_track)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            out.retain(|t| {
+                t.file_path
+                    .as_deref()
+                    .map(|p| std::path::Path::new(p).exists())
+                    .unwrap_or(false)
+            });
+            out.truncate(limit.max(0) as usize);
             Ok(out)
         })
     }
@@ -558,13 +590,23 @@ impl Db {
         })
     }
 
+    /// 最近播放：按每首歌**最后一次**播放时间倒序，先去重再取前 `limit` 首。
+    ///
+    /// 旧实现先 `LIMIT` 再 `GROUP BY`：反复听同一首歌时，最后 N 条历史全被
+    /// 这一首占满，去重后只剩一两首，「最近播放」看起来少了一大半。
+    /// 排序也曾误用 `t.added_at`（入库时间），和播放先后无关。
     pub fn recent_tracks(&self, limit: i64) -> AppResult<Vec<Track>> {
         self.with(|c| {
             let sql = format!(
                 "SELECT {} FROM tracks t
-                 WHERE t.id IN (SELECT track_id FROM play_history ORDER BY played_at DESC LIMIT {limit})
-                 GROUP BY t.id
-                 ORDER BY MAX(t.added_at) DESC",
+                 JOIN (
+                     SELECT track_id, MAX(played_at) AS last_played
+                     FROM play_history
+                     GROUP BY track_id
+                     ORDER BY last_played DESC
+                     LIMIT ?1
+                 ) h ON h.track_id = t.id
+                 ORDER BY h.last_played DESC",
                 TRACK_COLS
                     .split(", ")
                     .map(|col| format!("t.{col}"))
@@ -572,7 +614,7 @@ impl Db {
                     .join(", ")
             );
             let mut stmt = c.prepare(&sql)?;
-            let rows = stmt.query_map([], row_to_track)?;
+            let rows = stmt.query_map(params![limit], row_to_track)?;
             let mut out = Vec::new();
             for r in rows {
                 out.push(r?);
@@ -1057,5 +1099,231 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["bgEnabled"], false);
         assert_eq!(json["bgOpacity"], 35.0);
+    }
+
+    fn temp_db(tag: &str) -> (std::path::PathBuf, Db) {
+        let dir = std::env::temp_dir().join(format!(
+            "leonmusic-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        (dir, db)
+    }
+
+    /// LM-04：曲库超过单页上限后，翻页必须能取到全部（前端按页拉全量）。
+    /// 305 首是审查给出的边界值：默认页 300 会漏掉最后 5 首。
+    #[test]
+    fn list_tracks_pagination_covers_more_than_default_page() {
+        let (dir, db) = temp_db("pagination");
+        for i in 0..305 {
+            db.upsert_track(&make_track(&format!("local:{i:03}"), TrackSource::Local, None))
+                .unwrap();
+        }
+
+        let p0 = db.list_tracks(None, Some("local"), 300, 0).unwrap();
+        let p1 = db.list_tracks(None, Some("local"), 300, 300).unwrap();
+        assert_eq!(p0.len(), 300, "第一页满 300");
+        assert_eq!(p1.len(), 5, "第二页必须能拿到剩下的 5 首");
+        assert!(
+            p1.iter().all(|t| p0.iter().all(|p| p.id != t.id)),
+            "两页不能有重复"
+        );
+
+        // 前端一页 1000（后端 clamp 上限）一次拉完
+        let all = db.list_tracks(None, Some("local"), 1000, 0).unwrap();
+        assert_eq!(all.len(), 305);
+        assert_eq!(db.count_tracks(None).unwrap(), 305);
+
+        let mut ids: Vec<String> = all.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 305, "305 首全部可取且不重复");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LM-05：「已缓存」必须依据真实存在的缓存文件，而不是「所有在线曲目」。
+    #[test]
+    fn cached_tracks_only_returns_existing_plugin_files() {
+        let (dir, db) = temp_db("cached-tracks");
+        let live = dir.join("live.flac");
+        std::fs::write(&live, b"fLaC").unwrap();
+        let gone = dir.join("gone.flac"); // 故意不创建（模拟外部删除 / 清缓存）
+
+        let ne = TrackSource::Plugin {
+            plugin_id: "netease".into(),
+        };
+        db.upsert_track(&make_track(
+            "netease:live",
+            ne.clone(),
+            Some(live.to_string_lossy().into_owned()),
+        ))
+        .unwrap();
+        db.upsert_track(&make_track(
+            "netease:gone",
+            ne.clone(),
+            Some(gone.to_string_lossy().into_owned()),
+        ))
+        .unwrap();
+        // 在线但从未下载：file_path 为空
+        db.upsert_track(&make_track("netease:stream", ne, None)).unwrap();
+
+        // 本地曲目有文件路径，但语义上不属于「缓存」
+        let local_file = dir.join("local.mp3");
+        std::fs::write(&local_file, b"ID3").unwrap();
+        db.upsert_track(&make_track(
+            "local:1",
+            TrackSource::Local,
+            Some(local_file.to_string_lossy().into_owned()),
+        ))
+        .unwrap();
+
+        let cached = db.cached_tracks(100).unwrap();
+        let ids: Vec<&str> = cached.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["netease:live"],
+            "只列出文件真实存在的在线曲目；未下载、已失效、本地导入都不算"
+        );
+        assert_eq!(db.cached_tracks(0).unwrap().len(), 0, "limit=0 返回空");
+
+        // 文件被外部删除后即时消失
+        std::fs::remove_file(&live).unwrap();
+        assert!(db.cached_tracks(100).unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LM-10：query × source 的所有组合都必须正确绑定参数。
+    /// 旧实现把插件筛选写死成 `?4`，无关键词时只绑 1 个参数就报
+    /// `InvalidParameterCount(1, 4)`。
+    #[test]
+    fn list_tracks_query_and_source_matrix_binds_correct_params() {
+        let (dir, db) = temp_db("filter-matrix");
+        let ne = TrackSource::Plugin {
+            plugin_id: "netease".into(),
+        };
+        let qq = TrackSource::Plugin {
+            plugin_id: "qq".into(),
+        };
+        db.upsert_track(&make_track("local:1", TrackSource::Local, None))
+            .unwrap();
+        db.upsert_track(&make_track("netease:1", ne, None)).unwrap();
+        db.upsert_track(&make_track("qq:1", qq, None)).unwrap();
+
+        // 无关键词 + 插件筛选：旧代码在这里报错
+        assert_eq!(
+            db.list_tracks(None, Some("netease"), 100, 0).unwrap().len(),
+            1
+        );
+        assert_eq!(db.list_tracks(None, Some("qq"), 100, 0).unwrap().len(), 1);
+        // 无关键词 + local / all / 不传
+        assert_eq!(db.list_tracks(None, Some("local"), 100, 0).unwrap().len(), 1);
+        assert_eq!(db.list_tracks(None, Some("all"), 100, 0).unwrap().len(), 3);
+        assert_eq!(db.list_tracks(None, None, 100, 0).unwrap().len(), 3);
+
+        // 有关键词 + 各 source（make_track 的 title 都是「测试曲目」）
+        assert_eq!(
+            db.list_tracks(Some("测试"), Some("netease"), 100, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_tracks(Some("测试"), Some("local"), 100, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_tracks(Some("测试"), Some("all"), 100, 0)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            db.list_tracks(Some("不存在"), Some("all"), 100, 0)
+                .unwrap()
+                .len(),
+            0
+        );
+        // 空白关键词按「没有关键词」处理，参数数量仍要正确
+        assert_eq!(
+            db.list_tracks(Some("   "), Some("netease"), 100, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LM-08：最近播放的顺序必须按「最后一次播放时间」，不是入库时间。
+    #[test]
+    fn recent_tracks_orders_by_last_played_not_added_at() {
+        let (dir, db) = temp_db("recent-order");
+        // added_at 与播放先后故意相反：A 最早入库但最后播放
+        let mut a = make_track("local:a", TrackSource::Local, None);
+        a.added_at = 100;
+        let mut b = make_track("local:b", TrackSource::Local, None);
+        b.added_at = 300;
+        db.upsert_track(&a).unwrap();
+        db.upsert_track(&b).unwrap();
+
+        play_at(&db, "local:a", 1_000);
+        play_at(&db, "local:b", 2_000);
+        play_at(&db, "local:a", 3_000); // A 最后播放
+
+        let recent = db.recent_tracks(10).unwrap();
+        assert_eq!(
+            recent.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["local:a", "local:b"],
+            "应按最后播放时间倒序，按 added_at 排会得到 b,a"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LM-08：先去重再 LIMIT。反复听同一首歌不能把「最近播放」挤成一首。
+    #[test]
+    fn recent_tracks_dedups_before_limit() {
+        let (dir, db) = temp_db("recent-dedup");
+        for id in ["local:a", "local:b", "local:c"] {
+            db.upsert_track(&make_track(id, TrackSource::Local, None))
+                .unwrap();
+        }
+        // A 连听 10 次（最后那句仍在 A 上），随后 B、C 各一次早于这些？
+        // 顺序：B(t=100) → C(t=200) → A 连播 t=300..1200
+        play_at(&db, "local:b", 100);
+        play_at(&db, "local:c", 200);
+        for i in 0..10 {
+            play_at(&db, "local:a", 300 + i);
+        }
+
+        let recent = db.recent_tracks(2).unwrap();
+        assert_eq!(
+            recent.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["local:a", "local:c"],
+            "先 LIMIT 再去重时，最后 2 条历史都是 A，结果只会剩 1 首"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 直接写 play_history：`record_play` 用 now_ms()，同一毫秒内无法区分先后。
+    fn play_at(db: &Db, track_id: &str, played_at: i64) {
+        db.with(|c| {
+            c.execute(
+                "INSERT INTO play_history (track_id, played_at, ms_played) VALUES (?1, ?2, ?3)",
+                params![track_id, played_at, 1000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
     }
 }

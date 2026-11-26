@@ -54,6 +54,16 @@ pub fn library_count(app: AppHandle, query: Option<String>) -> AppResult<i64> {
     app.state::<AppState>().db.count_tracks(query.as_deref())
 }
 
+/// 已缓存的在线曲目（基于真实存在的缓存文件）。
+///
+/// 移动端「已缓存」原先从只含本地曲目的 store 数组里筛 `source.kind ===
+/// "plugin"`，结果恒为空。缓存列表必须独立查询：在线曲目不等于已下载。
+#[tauri::command]
+pub fn library_cached_tracks(app: AppHandle, limit: Option<i64>) -> AppResult<Vec<Track>> {
+    let limit = limit.unwrap_or(500).clamp(1, 10_000);
+    app.state::<AppState>().db.cached_tracks(limit)
+}
+
 #[tauri::command]
 pub fn library_track(app: AppHandle, id: String) -> AppResult<Option<Track>> {
     app.state::<AppState>().db.get_track(&id)
@@ -62,6 +72,15 @@ pub fn library_track(app: AppHandle, id: String) -> AppResult<Option<Track>> {
 #[tauri::command]
 pub fn library_toggle_favorite(app: AppHandle, track_id: String) -> AppResult<bool> {
     app.state::<AppState>().library.toggle_favorite(&track_id)
+}
+
+/// 按目标状态设置收藏（幂等）。前端红心按钮同时维护本地收藏与云端红心，
+/// 两边状态可能本来就不同步，盲 toggle 会把方向翻反。
+#[tauri::command]
+pub fn library_set_favorite(app: AppHandle, track_id: String, favorite: bool) -> AppResult<bool> {
+    app.state::<AppState>()
+        .library
+        .set_favorite(&track_id, favorite)
 }
 
 /// 批量写入远程曲目（云端歌单导入用）。
