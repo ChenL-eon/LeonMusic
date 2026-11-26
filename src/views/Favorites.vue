@@ -49,10 +49,10 @@ async function addQueue(t: Track) {
         :favorite-ids="library.favoriteIds"
         empty-text="点歌曲右侧的心形收藏"
         @play="play"
-        @favorite="(t) => library.toggleFavorite(t.id)"
+        @favorite="(t) => library.toggleFavorite(t)"
         @add-queue="addQueue"
         @add-playlist="addQueue"
-        @remove="(t) => library.toggleFavorite(t.id)"
+        @remove="(t) => library.toggleFavorite(t)"
       />
     </div>
   </div>

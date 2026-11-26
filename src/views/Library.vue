@@ -59,7 +59,7 @@ function play(_t: Track, i: number) {
 }
 
 async function fav(t: Track) {
-  const on = await library.toggleFavorite(t.id);
+  const on = await library.toggleFavorite(t);
   ui.toast(on ? "已喜欢" : "已取消", "success");
 }
 

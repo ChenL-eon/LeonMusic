@@ -194,7 +194,7 @@ onUnmounted(() => clearTimeout(pulseTimer));
         :click-play="settings.isAndroid"
           empty-text="歌单还是空的，去本地音乐右键添加"
           @play="play"
-          @favorite="(t) => library.toggleFavorite(t.id)"
+          @favorite="(t) => library.toggleFavorite(t)"
           @add-queue="addQueue"
           @add-playlist="addQueue"
           @remove="remove"

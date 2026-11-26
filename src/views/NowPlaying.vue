@@ -106,9 +106,14 @@ function cycleRepeat() {
 }
 
 async function toggleFav() {
-  if (!track.value) return;
-  const on = await library.toggleFavoriteTrack(track.value);
-  ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+  const t = track.value;
+  if (!t) return;
+  try {
+    const on = await library.toggleFavoriteTrack(t);
+    ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+  } catch (e) {
+    ui.toast(e instanceof Error ? e.message : "收藏失败", "error");
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@
     "build:only": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
+    "test:contract": "node --test scripts/tests/track-source-contract.test.mjs",
+    "test:stores": "node --test scripts/tests/player-lyrics-race.test.mjs scripts/tests/library-favorite-sync.test.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",

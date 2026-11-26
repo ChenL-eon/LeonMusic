@@ -159,13 +159,13 @@ function playResult(_t: Track, i: number) {
 }
 
 async function fav(t: Track) {
-  // 在线曲目需要先入库，收藏才有意义
-  const existing = library.tracks.find((x) => x.id === t.id);
-  if (!existing) {
-    ui.toast("在线曲目先播放一次即可收藏", "info");
-    return;
+  // 插件曲目直接红心到音源平台，不用先播放入库
+  try {
+    const on = await library.toggleFavorite(t);
+    ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+  } catch (e) {
+    ui.toast(e instanceof Error ? e.message : "收藏失败", "error");
   }
-  await library.toggleFavorite(t.id);
 }
 
 function addQueue(t: Track) {

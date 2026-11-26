@@ -109,8 +109,12 @@ function playRow(t: Track) {
 
 async function fav(t: Track) {
   // 云端红心联动（网易云插件 2.14.0）：插件曲目直接同步网易云
-  const on = await library.toggleFavoriteTrack(t);
-  ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+  try {
+    const on = await library.toggleFavoriteTrack(t);
+    ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
+  } catch (e) {
+    ui.toast(e instanceof Error ? e.message : "收藏失败", "error");
+  }
 }
 
 /** 私人FM：按账号口味推一批歌直接开播（未登录服务端只给试听）。 */

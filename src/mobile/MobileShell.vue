@@ -152,11 +152,12 @@ const subTitle = computed(() => {
   if (ui.page === "playlist") return library.activePlaylist?.name ?? "歌单";
   return SUB_TITLES[ui.page] ?? "";
 });
-const listTracks = computed(() =>
-  listKind.value === "recent"
-    ? library.recent
-    : library.tracks.filter((t) => t.source.kind === "plugin"),
-);
+const listTracks = computed(() => {
+  if (listKind.value === "recent") return library.recent;
+  // 「已缓存」用后端按真实缓存文件查出的列表；在线曲目不等于已下载
+  if (listKind.value === "cached") return library.cachedTracks;
+  return [];
+});
 
 function openSearch(keyword?: string) {
   pushNav({ searchKey: searchKey.value, searchKeyword: searchKeyword.value });
@@ -174,6 +175,8 @@ function openSub(page: Page) {
 function openList(kind: ListKind) {
   pushNav();
   listKind.value = kind;
+  // 进入缓存列表前刷新一次：下载完成 / 清缓存 / 文件被外部删除后都能即时反映
+  if (kind === "cached") void library.refreshCached();
 }
 
 function back() {

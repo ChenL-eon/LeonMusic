@@ -57,9 +57,18 @@ async function onVolumeWheel(e: WheelEvent) {
 }
 
 async function toggleFav() {
-  if (!track.value) return;
-  const on = await library.toggleFavoriteTrack(track.value);
-  if (on) ui.toast("已红心（同步到网易云）");
+  const t = track.value;
+  if (!t) return;
+  try {
+    const on = await library.toggleFavoriteTrack(t);
+    // 只有插件曲目会同步云端，本地曲目别误导成「已同步」
+    ui.toast(
+      on ? (t.source.kind === "plugin" ? "已红心（同步到网易云）" : "已加入我喜欢的音乐") : "已取消喜欢",
+      "success",
+    );
+  } catch (e) {
+    ui.toast(e instanceof Error ? e.message : "收藏失败", "error");
+  }
 }
 
 /** 倍速菜单：0.5x~2x 弹出选择（参考图 3），当前档位高亮。 */

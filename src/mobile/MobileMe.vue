@@ -54,18 +54,22 @@ async function loadAccount() {
 onMounted(() => {
   if (!store.loaded) void store.init().then(loadAccount);
   else void loadAccount();
+  void library.refreshCached();
 });
-/* 从账号页登录 / 退出后切回「我的」要刷新头像昵称 */
-onActivated(() => void loadAccount());
+/* 从账号页登录 / 退出后切回「我的」要刷新头像昵称；缓存数量同理 */
+onActivated(() => {
+  void loadAccount();
+  void library.refreshCached();
+});
 
 const expanded = ref(true);
 const creating = ref(false);
 const newName = ref("");
 
 const playlists = computed(() => library.playlists.filter((p) => !p.system));
-const cachedCount = computed(
-  () => library.tracks.filter((t) => t.source.kind === "plugin").length,
-);
+// 「已缓存」= 后端按真实缓存文件查出来的在线曲目。
+// 旧代码从 library.tracks（只含本地曲目）里筛 plugin，恒为 0。
+const cachedCount = computed(() => library.cachedTracks.length);
 
 interface Shortcut {
   id: string;

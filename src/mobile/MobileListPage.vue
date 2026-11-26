@@ -36,7 +36,7 @@ function playRow(t: Track) {
 }
 
 async function fav(t: Track) {
-  const on = await library.toggleFavorite(t.id);
+  const on = await library.toggleFavorite(t);
   ui.toast(on ? "已加入我喜欢的音乐" : "已取消喜欢", "success");
 }
 

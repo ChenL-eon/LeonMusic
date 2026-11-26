@@ -115,8 +115,16 @@ export const library = {
     list: (query?: string, source?: string, page = 0, pageSize = 300) =>
       invoke<Track[]>("library_list", { query, source, page, pageSize }),
     count: (query?: string) => invoke<number>("library_count", { query }),
+    /** 已缓存的在线曲目：由后端按「缓存文件真实存在」过滤，独立于本地曲库。
+     *  上限只防异常数据（后端 clamp 到 1 万），正常曲库远小于此，
+     *  免得「已缓存」计数再出现静默截断。 */
+    cachedTracks: (limit = 2000) =>
+      invoke<Track[]>("library_cached_tracks", { limit }),
     track: (id: string) => invoke<Track | null>("library_track", { id }),
     toggleFavorite: (trackId: string) => invoke<boolean>("library_toggle_favorite", { trackId }),
+    /** 按目标状态写收藏（幂等）：红心按钮不能用盲 toggle，云端/本地状态可能不同步 */
+    setFavorite: (trackId: string, favorite: boolean) =>
+      invoke<boolean>("library_set_favorite", { trackId, favorite }),
     favorites: () => invoke<Track[]>("library_favorites"),
     recent: (limit = 100) => invoke<Track[]>("library_recent", { limit }),
     remove: (id: string) => invoke<void>("library_delete", { id }),
