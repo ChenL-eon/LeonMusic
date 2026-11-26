@@ -34,6 +34,15 @@ const emit = defineEmits<{
 
 const hasTracks = computed(() => props.tracks.length > 0);
 
+/** 曲目来源徽章：显示平台名而不是插件 ID（netease → 网易云）。 */
+const PLUGIN_LABELS: Record<string, string> = {
+  netease: "网易云",
+  qq: "QQ音乐",
+};
+function pluginLabel(pluginId: string): string {
+  return PLUGIN_LABELS[pluginId] ?? pluginId;
+}
+
 function fmt(ms: number): string {
   if (!ms || ms < 0) return "--:--";
   const total = Math.round(ms / 1000);
@@ -86,7 +95,7 @@ function onRowClick(t: Track, i: number) {
         <div class="title">
           {{ t.title }}
           <VipBadge v-if="t.vip" :track="t" small />
-          <span v-if="t.source.kind === 'plugin'" class="badge">{{ t.source.pluginId }}</span>
+          <span v-if="t.source.kind === 'plugin'" class="badge">{{ pluginLabel(t.source.pluginId) }}</span>
         </div>
         <div class="sub">{{ t.artist || "未知艺术家" }}<template v-if="t.album"> · {{ t.album }}</template></div>
       </div>

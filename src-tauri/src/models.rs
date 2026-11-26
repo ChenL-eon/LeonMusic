@@ -29,7 +29,12 @@ pub struct MediaStatus {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TrackSource {
     Local,
-    Plugin { plugin_id: String },
+    Plugin {
+        /// 序列化为 `pluginId`（前端契约）；`alias` 兼容旧持久化数据里的 `plugin_id`。
+        /// 注意：枚举上的 `rename_all` 只作用于变体名，不作用于变体内部字段。
+        #[serde(rename = "pluginId", alias = "plugin_id")]
+        plugin_id: String,
+    },
     Stream,
 }
 
@@ -457,5 +462,75 @@ mod tests {
         assert!(!json.contains("qualityHint"));
         let back: Track = serde_json::from_str(&json).unwrap();
         assert!(back.quality_hint.is_none());
+    }
+
+    /// 前端契约：必须输出 camelCase 的 `pluginId`，不能漏出 `plugin_id`。
+    ///
+    /// 断言的是**共享 fixture 文件**的精确内容（`scripts/tests/fixtures/track-source-plugin.json`），
+    /// 前端 `scripts/tests/track-source-contract.test.mjs` 读同一个文件验证 `source.pluginId`。
+    /// 任一侧改名都会让两边之一失败。
+    #[test]
+    fn track_source_plugin_matches_shared_frontend_fixture() {
+        const FIXTURE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/tests/fixtures/track-source-plugin.json"
+        ));
+        let src = TrackSource::Plugin {
+            plugin_id: "netease".into(),
+        };
+        let json = serde_json::to_string(&src).unwrap();
+        assert_eq!(json, FIXTURE.trim());
+        assert!(
+            !json.contains("plugin_id"),
+            "plugin_id 会泄漏到前端，导致 source.pluginId 为 undefined: {json}"
+        );
+    }
+
+    /// 旧持久化数据（数据库里存的是 `plugin_id`）必须仍能读回。
+    #[test]
+    fn track_source_accepts_legacy_snake_case_plugin_id() {
+        let src: TrackSource =
+            serde_json::from_str(r#"{"kind":"plugin","plugin_id":"qq"}"#).unwrap();
+        assert_eq!(src.plugin_id(), Some("qq"));
+
+        let src: TrackSource =
+            serde_json::from_str(r#"{"kind":"plugin","pluginId":"qq"}"#).unwrap();
+        assert_eq!(src.plugin_id(), Some("qq"));
+    }
+
+    /// Track 整体序列化时 pluginId 也在顶层可见（前端读 t.source.pluginId）。
+    #[test]
+    fn track_payload_exposes_camel_case_source_field() {
+        let t = Track {
+            id: "netease:1".into(),
+            source: TrackSource::Plugin {
+                plugin_id: "qq".into(),
+            },
+            title: "t".into(),
+            artist: String::new(),
+            album: String::new(),
+            duration_ms: 0,
+            cover_path: None,
+            cover_url: None,
+            file_path: None,
+            stream_url: None,
+            quality_hint: None,
+            plugin_track_id: None,
+            format: None,
+            bitrate: None,
+            sample_rate: None,
+            channels: None,
+            vip: false,
+            added_at: 0,
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        let source = v.get("source").expect("source 字段");
+        assert_eq!(source.get("kind").and_then(|k| k.as_str()), Some("plugin"));
+        assert_eq!(
+            source.get("pluginId").and_then(|p| p.as_str()),
+            Some("qq"),
+            "前端按 source.pluginId 读取，实际 JSON: {source}"
+        );
+        assert!(source.get("plugin_id").is_none());
     }
 }
