@@ -76,6 +76,10 @@ export const usePlayerStore = defineStore("player", () => {
   const qualityWarned = new Set<string>();
   /** 正在自动拉歌词的曲目 id，避免切歌抖动时对同一首重复请求。 */
   let lyricsAutoFetch = "";
+  /** 歌词请求代次。每次发起新请求（切歌 / 手动获取）自增，
+   *  响应回来时只有代次仍是最新的才能提交——A→B→A 这种同 ID 场景
+   *  光比较曲目 ID 拦不住旧响应。 */
+  let lyricsSeq = 0;
 
   // ---- 听歌打卡（把真实播放同步到音源平台）----
   //
@@ -283,31 +287,39 @@ export const usePlayerStore = defineStore("player", () => {
   }
 
   async function loadLyrics() {
+    const seq = ++lyricsSeq;
+    const wantId = snap.value.track?.id;
     // 先清空：否则切歌瞬间还会显示上一首的歌词
     lyrics.value = emptyLyrics();
-    const wantId = snap.value.track?.id;
+
+    // 响应先放局部变量，确认代次与曲目都没变再提交。
+    // 旧实现直接 `lyrics.value = await player.lyrics()`，随后才查身份——
+    // A 的响应晚于切到 B 时，会把 B 的歌词覆盖成 A 的。
+    let local: Lyrics;
     try {
-      lyrics.value = await player.lyrics();
+      local = await player.lyrics();
     } catch {
       return;
     }
-    // 等待期间又切歌了，这一份结果已经过期
-    if (!wantId || snap.value.track?.id !== wantId) return;
+    if (seq !== lyricsSeq || !wantId || snap.value.track?.id !== wantId) return;
+    lyrics.value = local;
 
     // 在线曲目第一次播放时本地没有缓存，得主动去插件拉一次。
     // 不做这一步的话，用户得自己发现「正在播放」页那个小按钮——
     // 事实上没人会去找，于是「这个播放器没歌词」。
     const t = snap.value.track;
-    if (lyrics.value.lines.length || t?.source.kind !== "plugin") return;
+    if (local.lines.length || t?.source.kind !== "plugin") return;
     if (lyricsAutoFetch === t.id) return;
     lyricsAutoFetch = t.id;
     try {
       const remote = await player.fetchRemoteLyrics();
-      if (snap.value.track?.id === wantId) lyrics.value = remote;
+      // 自动远端同样要校验代次：这期间可能已切歌或又有手动请求
+      if (seq === lyricsSeq && snap.value.track?.id === wantId) lyrics.value = remote;
     } catch {
       /* 拉不到就保持空状态，界面上还有「获取在线歌词」按钮可重试 */
     } finally {
-      lyricsAutoFetch = "";
+      // 只清自己设置的那次，别把后来者的防重入标记抹掉
+      if (lyricsAutoFetch === t.id) lyricsAutoFetch = "";
     }
   }
 
@@ -376,8 +388,14 @@ export const usePlayerStore = defineStore("player", () => {
     if (remote.length) await player.addTracksToQueue(remote, playNext);
   }
   async function fetchRemoteLyrics() {
+    // 手动获取同样要防过期：A 的请求晚于切到 B 返回时不能覆盖 B 的歌词。
+    // 自增代次还会让仍在飞的自动远端响应失效（它检测到代次变了会放弃提交）。
+    const seq = ++lyricsSeq;
+    const wantId = snap.value.track?.id;
     try {
-      lyrics.value = await player.fetchRemoteLyrics();
+      const remote = await player.fetchRemoteLyrics();
+      if (seq !== lyricsSeq || !wantId || snap.value.track?.id !== wantId) return;
+      lyrics.value = remote;
     } catch {
       /* 没有就算了 */
     }
