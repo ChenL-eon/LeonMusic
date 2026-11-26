@@ -300,7 +300,14 @@ impl SharedState {
 // ---------------------------------------------------------------------------
 
 pub enum EngineCommand {
-    PlayTrack { track: Track, start_ms: u64 },
+    /// `queue_index` 是调用方知道的队列位置（异步解析完成时回填）。
+    /// 队列允许同一首歌出现多次，只按 id 搜索会命中第一份，
+    /// 把从第 N 份开始播的用户拽回第 1 份。
+    PlayTrack {
+        track: Track,
+        start_ms: u64,
+        queue_index: Option<usize>,
+    },
     Pause,
     Resume,
     Toggle,
@@ -1115,7 +1122,11 @@ fn handle_command(
     platform: &Arc<dyn PlatformHost>,
 ) {
     match cmd {
-        EngineCommand::PlayTrack { track, start_ms } => {
+        EngineCommand::PlayTrack {
+            track,
+            start_ms,
+            queue_index,
+        } => {
             let out = match ensure_output(output, shared) {
                 Ok(o) => o,
                 Err(e) => {
@@ -1133,7 +1144,11 @@ fn handle_command(
             //
             // 这里把契约收紧成一条：**只要在播，队列里就一定有它，且 cursor 指向它**。
             // 不在队列里就把队列重置成这一首（单曲播放的语义）。
-            match queue.items().iter().position(|t| t.id == track.id) {
+            //
+            // 定位优先用调用方给的 `queue_index`：同一首歌可能在队列里出现
+            // 多次（重复点「播放全部」、同曲在不同歌单），按 id 搜索会命中
+            // 第一份，用户从第 9 项开始播、解析完却被拽回第 3 项。
+            match queue.resolve_target(&track.id, queue_index) {
                 Some(i) => {
                     queue.jump_to(i);
                 }
@@ -1268,8 +1283,39 @@ fn handle_command(
             }
         }
         EngineCommand::QueueRemove(i) => {
-            queue.remove(i);
-            broadcast_queue(queue, shared, app);
+            let was_current = queue.remove(i);
+            if !was_current {
+                // 删的不是当前项：队列视图更新即可，播放不受影响
+                broadcast_queue(queue, shared, app);
+            } else if let Some(idx) = queue.current_index() {
+                broadcast_queue(queue, shared, app);
+                let was_playing = matches!(
+                    shared.status(),
+                    PlaybackStatus::Playing | PlaybackStatus::Buffering
+                );
+                if was_playing {
+                    // 在播/加载中删歌：立即切到后继，别让旧 Session 继续放
+                    // 已删除的曲目（否则播完后 next 会跳过本应接上的那首）
+                    play_index(idx, queue, session, output, shared, app, platform);
+                } else {
+                    // 暂停/停止状态删歌：只换当前曲目，不突然出声。
+                    // 旧 Session 必须丢掉——它还持有已删除的曲目。
+                    *session = None;
+                    *shared.track.write() = queue.items().get(idx).cloned();
+                    shared.position_ms.store(0, Ordering::Relaxed);
+                    platform.update_playback_state(false);
+                }
+            } else {
+                // 队列删空：停止播放
+                *session = None;
+                *shared.track.write() = None;
+                shared.clear_resume();
+                shared.source_rate.store(0, Ordering::Relaxed);
+                shared.set_status(PlaybackStatus::Stopped);
+                shared.position_ms.store(0, Ordering::Relaxed);
+                broadcast_queue(queue, shared, app);
+                platform.update_playback_state(false);
+            }
         }
         EngineCommand::QueueMove { from, to } => {
             queue.move_item(from, to);

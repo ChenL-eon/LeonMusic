@@ -51,6 +51,25 @@ impl PlayQueue {
         self.cursor.and_then(|c| self.order.get(c).copied())
     }
 
+    /// 一条 `PlayTrack` 应该落在哪个队列位置。
+    ///
+    /// 队列里同一首歌可以出现多次（重复点「播放全部」、同一首在不同歌单），
+    /// 只按 id 搜索会命中第一份：用户从第 N 份开始播，异步解析完成后
+    /// cursor 被拽回第一份，队列高亮错行、「下一首」也接错地方。
+    ///
+    /// 优先级：调用方给的 `hint`（校验 id 仍匹配）→ 当前 cursor（id 匹配）
+    /// → 第一次出现的位置。
+    pub fn resolve_target(&self, track_id: &str, hint: Option<usize>) -> Option<usize> {
+        let matches = |i: usize| self.items.get(i).is_some_and(|t| t.id == track_id);
+        if let Some(i) = hint.filter(|&i| matches(i)) {
+            return Some(i);
+        }
+        if let Some(i) = self.current_index().filter(|&i| matches(i)) {
+            return Some(i);
+        }
+        self.items.iter().position(|t| t.id == track_id)
+    }
+
     pub fn current(&self) -> Option<&Track> {
         self.current_index().and_then(|i| self.items.get(i))
     }
@@ -100,34 +119,49 @@ impl PlayQueue {
         self.restore_cursor_by_track(current_track);
     }
 
-    pub fn remove(&mut self, index: usize) {
+    /// 删除队列中的一项（`items` 下标）。
+    ///
+    /// 返回 `true` 表示删掉的是**当前播放项**——调用方必须同步 Session
+    /// （切到后继或停止），否则音频还在放已删除的曲目、播完后 `next`
+    /// 会直接跳过本应接上的那一首。
+    ///
+    /// cursor 修正按 `order`（真实播放次序）的位置算：随机模式下
+    /// `order` 与 `items` 下标不同，只按 items 下标钳位会指向别的歌。
+    pub fn remove(&mut self, index: usize) -> bool {
         if index >= self.items.len() {
-            return;
+            return false;
         }
         let was_current = self.current_index() == Some(index);
-        self.items.remove(index);
+        let pos_in_order = self.order.iter().position(|&i| i == index);
 
-        // 修正 order 中的下标
-        let mut new_order: Vec<usize> = Vec::with_capacity(self.order.len());
-        for &i in &self.order {
-            if i == index {
-                continue;
+        self.items.remove(index);
+        // 修正 order 里的 items 下标
+        for i in &mut self.order {
+            if *i > index {
+                *i -= 1;
             }
-            new_order.push(if i > index { i - 1 } else { i });
         }
-        self.order = new_order;
+
+        if let Some(p) = pos_in_order {
+            self.order.remove(p);
+            if let Some(c) = self.cursor {
+                if p < c {
+                    // 删的是当前项之前的条目：cursor 前移一位，仍指向同一首歌。
+                    // 旧实现只做钳位，于是「播 B 时删 A」会变成播 C。
+                    self.cursor = Some(c - 1);
+                }
+                // p == c：删的是当前项，cursor 留在原位让后继顶上来；
+                // p > c：当前项之前的播放次序没变，不动。
+            }
+        }
 
         if self.items.is_empty() {
             self.cursor = None;
-            return;
-        }
-        if was_current {
-            // 删掉的是当前曲目：cursor 指向同一位置（下一首），越界则回 0
-            let c = self.cursor.unwrap_or(0);
-            self.cursor = Some(c.min(self.order.len().saturating_sub(1)));
         } else if let Some(c) = self.cursor {
+            // 删掉最后一项时 cursor 会越界，退回新的末尾
             self.cursor = Some(c.min(self.order.len().saturating_sub(1)));
         }
+        was_current
     }
 
     pub fn move_item(&mut self, from: usize, to: usize) {
@@ -305,8 +339,83 @@ mod tests {
     fn remove_adjusts_cursor() {
         let mut q = PlayQueue::default();
         q.set_items(vec![track("a"), track("b"), track("c")], Some(0));
-        q.remove(0);
+        assert!(q.remove(0), "删除当前项应报告 was_current");
         assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+    }
+
+    /// LM-03：删当前项**之前**的条目，不能把当前播的歌换掉。
+    /// 旧实现只钳位 cursor，[A,B,C,D] 播 B 删 A 会变成播 C。
+    #[test]
+    fn remove_before_current_keeps_same_track() {
+        let mut q = PlayQueue::default();
+        q.set_items(
+            vec![track("a"), track("b"), track("c"), track("d")],
+            Some(1),
+        );
+        assert!(!q.remove(0));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("b".into()));
+        assert_eq!(q.current_index(), Some(0), "B 现在在 items[0]");
+        // 下一步必须走到 C（而不是跳过）
+        assert_eq!(q.next(true), Some(1));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("c".into()));
+    }
+
+    /// LM-03：删当前项 → 游标指向后继，返回 true 让引擎切歌。
+    #[test]
+    fn remove_current_advances_to_successor() {
+        let mut q = PlayQueue::default();
+        q.set_items(
+            vec![track("a"), track("b"), track("c"), track("d")],
+            Some(1),
+        );
+        assert!(q.remove(1));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("c".into()));
+        // 继续播完后继之后是 D，不能跳过
+        assert_eq!(q.next(true), Some(2));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("d".into()));
+    }
+
+    #[test]
+    fn remove_current_last_item_falls_back_to_previous() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a"), track("b")], Some(1));
+        assert!(q.remove(1));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("a".into()));
+    }
+
+    #[test]
+    fn remove_only_item_clears_current() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a")], Some(0));
+        assert!(q.remove(0));
+        assert!(q.current().is_none());
+        assert_eq!(q.current_index(), None);
+        assert_eq!(q.next(true), None);
+    }
+
+    #[test]
+    fn remove_out_of_range_is_noop() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a")], Some(0));
+        assert!(!q.remove(9));
+        assert_eq!(q.current().map(|t| t.id.clone()), Some("a".into()));
+    }
+
+    /// 随机模式下 order 与 items 下标不同：删除非当前项必须仍指向同一首歌。
+    #[test]
+    fn remove_non_current_in_shuffle_keeps_current_identity() {
+        let mut q = PlayQueue::default();
+        q.set_shuffle(true);
+        q.set_items(
+            vec![track("a"), track("b"), track("c"), track("d")],
+            Some(1),
+        );
+        let cur = q.current_index().unwrap();
+        let before = q.current().map(|t| t.id.clone());
+        let victim = (0..4).find(|i| *i != cur).unwrap();
+        assert!(!q.remove(victim));
+        assert_eq!(q.current().map(|t| t.id.clone()), before);
+        assert_eq!(q.order.len(), q.items.len(), "order 必须与 items 等长");
     }
 
     #[test]
@@ -372,5 +481,49 @@ mod tests {
         q.rebuild_order();
         let before = q.current_index();
         assert_ne!(q.next(true), before, "非法组合也不能退化成单曲循环");
+    }
+
+    /// LM-09：同一首歌在队列里有重复条目时，解析完成后的 PlayTrack
+    /// 必须落回用户点的那一份，而不是第一份。
+    #[test]
+    fn resolve_target_keeps_requested_duplicate_entry() {
+        let mut q = PlayQueue::default();
+        q.set_items(
+            vec![track("a"), track("b"), track("a"), track("c")],
+            Some(2), // 用户点的是第二份 a
+        );
+        assert_eq!(q.resolve_target("a", Some(2)), Some(2));
+        // 旧实现等价于只按 id 搜索：命中第一份（下标 0），也就是缺陷本身
+        assert_eq!(q.items().iter().position(|t| t.id == "a"), Some(0));
+        assert_ne!(q.resolve_target("a", Some(2)), Some(0));
+
+        // 没有 hint 时用当前 cursor（同一首歌的第一次出现是 0）
+        assert_eq!(q.resolve_target("a", None), Some(2));
+
+        // hint 已经过期（队列被改过，位置 2 换成了 c）：退回 cursor / 首个匹配
+        assert_eq!(q.resolve_target("a", Some(3)), Some(2));
+        assert_eq!(q.resolve_target("c", Some(0)), Some(3));
+    }
+
+    #[test]
+    fn resolve_target_falls_back_to_first_match_or_none() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a"), track("b"), track("a")], Some(1));
+
+        // 当前项不是这首歌、hint 也不匹配：按第一次出现定位（旧行为）
+        assert_eq!(q.resolve_target("a", None), Some(0));
+        // 队列里没有这首歌：交给调用方重建队列
+        assert_eq!(q.resolve_target("zzz", None), None);
+        assert_eq!(q.resolve_target("zzz", Some(0)), None);
+    }
+
+    /// 随机模式下 `cursor` 与 `items` 下标不同，hint 仍然要按 items 下标生效。
+    #[test]
+    fn resolve_target_uses_item_index_under_shuffle() {
+        let mut q = PlayQueue::default();
+        q.set_items(vec![track("a"), track("b"), track("a")], Some(2));
+        q.set_shuffle(true);
+        assert_eq!(q.current_index(), Some(2));
+        assert_eq!(q.resolve_target("a", Some(2)), Some(2));
     }
 }

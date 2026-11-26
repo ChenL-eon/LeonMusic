@@ -238,7 +238,18 @@ pub(crate) async fn resolve_and_play(
                     return Ok(());
                 }
                 let st = app.state::<AppState>();
-                st.engine.send(EngineCommand::PlayTrack { track, start_ms });
+                // 带上队列位置：同一首歌可能在队列里出现多次，只给 id 会让
+                // 引擎按 id 搜索命中第一份，把从第 N 份开始播的用户拽回去。
+                let queue_index = {
+                    let q = st.engine.shared().queue_snapshot();
+                    q.current
+                        .filter(|&i| q.items.get(i).is_some_and(|t| t.id == track.id))
+                };
+                st.engine.send(EngineCommand::PlayTrack {
+                    track,
+                    start_ms,
+                    queue_index,
+                });
                 preload_next(app);
                 return Ok(());
             }
