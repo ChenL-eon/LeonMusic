@@ -183,8 +183,9 @@ impl BlockingHttp {
         };
         let build_stream = |no_proxy: bool| -> reqwest::blocking::Client {
             // 不设 client 级总超时：整曲下载可达几十秒。请求层（open_range）
-            // 会带 per-request timeout；单连接挂死/断流由流式层的断点续传
-            // 与 cancel 检查兜底（reqwest blocking builder 没有 read_timeout）。
+            // 会带 per-request timeout。blocking builder 没有 read_timeout，
+            // 单次 read 阻塞最坏要等到 per-request 超时；正常有数据流动时
+            // 每个 chunk 返回后都会检查取消标志（LM-02）。
             let mut b = reqwest::blocking::Client::builder()
                 .user_agent(USER_AGENT)
                 .connect_timeout(Duration::from_secs(8));

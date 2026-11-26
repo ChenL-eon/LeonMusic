@@ -17,14 +17,17 @@
 //! * **落盘安全性**：重连会丢弃部分缓冲，所以只有 `.part` 覆盖全文件时才
 //!   finalize（写库）。发生过重连的会话播放不受影响（数据按需重拉），
 //!   只是缓冲不完整、不进缓存、下次重播再走一次流式。
-//! * **取消**：下载线程每收一个 chunk 都检查 `Arc::strong_count`——只剩
-//!   线程自己持有（Session 已 drop）就中止、删 `.part`、退出。
+//! * **取消**：`HttpStream` 自己维护读端计数——每个克隆各算一个读端，
+//!   **最后一个读端 drop** 时才置取消标志并唤醒下载线程（不是靠
+//!   `Arc::strong_count`：下载线程自身持有多个 Arc，那个阈值永远不可达）。
+//!   下载线程在每个 chunk、驻留等待、背压等待处检查取消，退出时关闭连接、
+//!   刷新并关闭 `.part`、删除未完成的临时文件。
 //! * **防御**：缓冲带 64MB 硬上限（背压暂停下载）、下载线程 panic 被
 //!   catch_unwind 兜住并通知读端（panic=unwind 下线程死了不能让 read 永等）。
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -71,14 +74,42 @@ struct Inner {
     cv: Condvar,
     /// 下载线程已写盘的字节数（诊断用）。
     written: AtomicU64,
+    /// 存活的读端数量。`HttpStream` 每克隆一份 +1、drop 一份 -1。
+    /// 归零说明解码器 / 播放会话已彻底放手，下载线程应退出。
+    readers: AtomicUsize,
+    /// 最后一个读端释放时置位。下载线程靠它判断该收摊，
+    /// 不依赖 `Arc::strong_count`（线程自己就持有多个 Arc，阈值不可达）。
+    cancelled: AtomicBool,
+    /// 本会话的缓冲上限。生产固定 [`BUF_LIMIT`]；测试可调小以真实触发背压。
+    buf_limit: usize,
 }
 
 /// symphonia `MediaSource` 实现。
 pub struct HttpStream(Arc<Inner>);
 
+impl HttpStream {
+    /// 登记一个读端。所有构造路径都必须走这里，否则计数会与真实读端脱节。
+    fn attach(inner: Arc<Inner>) -> Self {
+        inner.readers.fetch_add(1, Ordering::SeqCst);
+        Self(inner)
+    }
+}
+
 impl Clone for HttpStream {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self::attach(self.0.clone())
+    }
+}
+
+impl Drop for HttpStream {
+    fn drop(&mut self) {
+        // 只有计数从 1 减到 0（这就是最后一个读端）才取消下载。
+        // 克隆体之间互不影响：任何一个先 drop 都不会停掉仍在用的读端。
+        if self.0.readers.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.cancelled.store(true, Ordering::SeqCst);
+            // 唤醒驻留 / 背压中的下载线程（等待方都有超时兜底，丢唤醒也不会睡死）
+            self.0.cv.notify_all();
+        }
     }
 }
 
@@ -92,8 +123,13 @@ impl HttpStream {
         self.lock().content_type.clone()
     }
 
+    /// 取消标志（仅测试用来断言「克隆体释放不应误取消」）。
+    #[cfg(test)]
+    fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
     /// 探测用：等首块数据到齐，复制开头 `max` 字节，**不移动读游标**。
-    ///
     /// 只对「从 0 开始、尚未淘汰头部」的会话有效；已重连到中间位置时返回空。
     /// 目的是让调用方在交给 symphonia 之前就能识别「服务器回的是网页/JSON」，
     /// 否则只会得到一句 `no suitable format reader found`。
@@ -152,6 +188,11 @@ impl Read for HttpStream {
                         let drop_n = from - KEEP_WINDOW;
                         st.buf.drain(..drop_n);
                         st.base += drop_n as u64;
+                    }
+                    // 缓冲吃紧时唤醒被背压暂停的下载线程（它在等读端消费）。
+                    // 阈值取一半：接近上限的每一次消费都值得让它重新评估。
+                    if st.buf.len() >= self.0.buf_limit / 2 {
+                        self.0.cv.notify_all();
                     }
                     return Ok(n);
                 }
@@ -236,6 +277,21 @@ pub fn spawn_download(
     final_path: PathBuf,
     on_finish: Box<dyn FnOnce(AppResult<()>) + Send + 'static>,
 ) -> AppResult<PendingDownload> {
+    spawn_download_with_limit(
+        url, client, referer, tmp_path, final_path, on_finish, BUF_LIMIT,
+    )
+}
+
+/// 同 [`spawn_download`]，但可指定缓冲上限（测试用较小值真实触发背压）。
+fn spawn_download_with_limit(
+    url: String,
+    client: reqwest::blocking::Client,
+    referer: Option<&'static str>,
+    tmp_path: PathBuf,
+    final_path: PathBuf,
+    on_finish: Box<dyn FnOnce(AppResult<()>) + Send + 'static>,
+    buf_limit: usize,
+) -> AppResult<PendingDownload> {
     let inner = Arc::new(Inner {
         state: Mutex::new(StreamState {
             base: 0,
@@ -249,10 +305,17 @@ pub fn spawn_download(
         }),
         cv: Condvar::new(),
         written: AtomicU64::new(0),
+        // 从 0 起算：PendingDownload.stream 由下面的 HttpStream::attach 登记，
+        // 那一次就是第一个读端（写成 1 再加 attach 会凭空多一个，永远不取消）。
+        readers: AtomicUsize::new(0),
+        cancelled: AtomicBool::new(false),
+        buf_limit,
     });
     let (tx, rx) = mpsc::channel::<AppResult<PathBuf>>();
 
     let worker = inner.clone();
+    // panic 时 run_download 的栈已展开、临时文件无人清理，外层留一份路径兜底
+    let tmp_for_panic = tmp_path.clone();
     std::thread::Builder::new()
         .name("audio-stream-dl".into())
         .spawn(move || {
@@ -282,19 +345,37 @@ pub fn spawn_download(
                 };
                 tracing::error!("audio stream download thread panicked: {msg}");
                 notify(&watch, Some(format!("download thread panicked: {msg}")), false);
+                // panic 路径同样不能留 .part 垃圾
+                let _ = std::fs::remove_file(&tmp_for_panic);
             }
         })
         .map_err(|e| AppError::audio(format!("spawn stream thread: {e}")))?;
 
     Ok(PendingDownload {
-        stream: HttpStream(inner),
+        stream: HttpStream::attach(inner),
         done: rx,
     })
 }
 
-/// 每收一个 chunk 检查：只剩下载线程自己持有 Arc（Session 已 drop）就中止。
-fn cancelled(inner: &Arc<Inner>) -> bool {
-    Arc::strong_count(inner) <= 1
+/// 下载线程的收摊条件：最后一个读端已释放。
+fn cancelled(inner: &Inner) -> bool {
+    inner.cancelled.load(Ordering::SeqCst)
+}
+
+/// 取消 / 异常退出时统一收尾：关连接、刷盘关文件、删未完成的 `.part`。
+fn abort_cleanup(
+    inner: &Inner,
+    resp: &mut Option<reqwest::blocking::Response>,
+    file: &mut Option<std::fs::File>,
+    tmp_path: &Path,
+) {
+    drop(resp.take());
+    if let Some(mut f) = file.take() {
+        use std::io::Write as _;
+        let _ = f.flush();
+    }
+    let _ = std::fs::remove_file(tmp_path);
+    inner.cv.notify_all();
 }
 
 /// 落盘前的体检：只认音频容器魔数 / 帧同步。
@@ -332,7 +413,8 @@ fn looks_like_audio(path: &Path) -> bool {
     s[0] == 0xFF && s[1] & 0xE0 == 0xE0
 }
 
-fn notify(inner: &Inner, err: Option<String>, eof: bool) {    {
+fn notify(inner: &Inner, err: Option<String>, eof: bool) {
+    {
         let mut st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
         if err.is_some() {
             st.err = err;
@@ -363,15 +445,9 @@ fn run_download(
     let mut parked = false;
 
     loop {
-        // ---- cancel 检查（Session drop）----
+        // ---- cancel 检查（最后一个读端已释放）----
         if cancelled(&inner) {
-            drop(resp);
-            if let Some(f) = file.as_mut() {
-                use std::io::Write as _;
-                let _ = f.flush();
-            }
-            drop(file.take());
-            let _ = std::fs::remove_file(&tmp_path);
+            abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
             return; // 不调 on_finish：切歌后没人关心落盘结果
         }
 
@@ -412,18 +488,20 @@ fn run_download(
                 Ok((r, base, total)) => {
                     let mut st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
                     // 重开连接的数据语义：
-                    // * 断流续传（resume = base + buf_len > st.base）→ buf 保留，
-                    //   新数据紧接已缓冲尾部 append。
-                    // * 回跳 / 同点重开（base <= st.base）→ buf 必须清掉重建。
-                    //   读端在旧 restart 被 take 后、重连生效前的窗口里会补设
-                    //   第二个 restart（见 Read::read 的 pos<base 分支），处理它
-                    //   会同偏移重开连接——不清 buf 就会把整段头部再 append
-                    //   一遍，数据流错位（回归测试抓到：byte at 8192 读出
-                    //   pattern[0]，实为 buf 里的第二份重复数据）。
-                    if base <= st.base {
+                    // 重开连接的数据语义（buf[0] 永远对应 st.base）：
+                    // * **精确接尾续传**（base == st.base + buf.len()）→ buf 保留、
+                    //   base 保持不变，新数据正好 append 到尾部。
+                    // * **其余全部**（回跳、跳到未缓冲区域之后、同点重开）→
+                    //   旧缓冲与新区间不连续，必须清空并把 base 换到新起点。
+                    //   旧实现只在 base <= st.base 时清，seek 到远处（base 远大于
+                    //   st.base）会保留错位数据——读端把旧 buf 当成新位置的内容，
+                    //   解码出垃圾并卡死。读端在 restart 被 take 后、重连生效前
+                    //   补设的第二个同偏移 restart 也走这里（清 buf 防重复 append）。
+                    let resume_tail = st.base + st.buf.len() as u64;
+                    if base != resume_tail {
                         st.buf.clear();
+                        st.base = base;
                     }
-                    st.base = base;
                     st.eof = false;
                     st.err = None;
                     if total.is_some() {
@@ -438,18 +516,29 @@ fn run_download(
                         f(Err(e));
                     }
                     let _ = tx.send(Err(AppError::net("stream reconnect failed")));
+                    abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
                     return;
                 }
             }
         }
 
-        // ---- 驻留检查：EOF 后没有 restart 就小睡等待，绝不能掉进
+        // ---- 驻留检查：EOF 后没有 restart 就等待，绝不能掉进
         // 下面的「首次连接」把整曲从 0 重下 ----
+        // 用 Condvar 等而不是盲睡：读端 seek 会 notify 立即唤醒；
+        // 最后一个读端释放也会 notify，下一轮循环入口就能看到取消标志。
         if parked {
             if want.is_some() {
                 parked = false; // restart 已在上方处理（重开 Range、清 eof 标志）
             } else {
-                std::thread::sleep(Duration::from_millis(120));
+                let st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                let (st, _) = inner
+                    .cv
+                    .wait_timeout(st, Duration::from_millis(500))
+                    .unwrap_or_else(|p| p.into_inner());
+                if st.restart.is_some() {
+                    parked = false;
+                }
+                drop(st);
                 continue;
             }
         }
@@ -475,6 +564,7 @@ fn run_download(
                         f(Err(e));
                     }
                     let _ = tx.send(Err(AppError::net("stream open failed")));
+                    abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
                     return;
                 }
             }
@@ -556,6 +646,7 @@ fn run_download(
                             f(Err(AppError::net(msg.clone())));
                         }
                         let _ = tx.send(Err(AppError::net(msg)));
+                        abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
                         return;
                     }
                     notify(&inner, None, true);
@@ -588,19 +679,26 @@ fn run_download(
             Ok(n) => {
                 // 背压：缓冲已达硬上限且文件还没下完时暂停推进，等读端消费。
                 // 正常一首歌 ≤ 40MB 全量缓冲远够；没有这条，异常大响应会吃穿内存。
+                // 读端已释放时必须立刻收摊——旧版只看 strong_count，这里会永远等。
+                // 读端 seek 到未缓冲区域（restart）时必须让路去重连，否则：
+                // 读端等数据、下载线程等读端消费，双方永久互等。
                 loop {
                     if cancelled(&inner) {
+                        abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
+                        return;
+                    }
+                    let st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                    let restart_pending = st.restart.is_some();
+                    let stalled = st.buf.len() >= inner.buf_limit
+                        && st.len.map_or(true, |l| l > st.base + st.buf.len() as u64);
+                    if !stalled || restart_pending {
                         break;
                     }
-                    let stalled = {
-                        let st = inner.state.lock().unwrap_or_else(|p| p.into_inner());
-                        st.buf.len() >= BUF_LIMIT
-                            && st.len.map_or(true, |l| l > st.base + st.buf.len() as u64)
-                    };
-                    if !stalled {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(150));
+                    // 读端每取走数据会 notify；150ms 只是兜底节拍
+                    let (_st, _) = inner
+                        .cv
+                        .wait_timeout(st, Duration::from_millis(150))
+                        .unwrap_or_else(|p| p.into_inner());
                 }
                 let bytes = &chunk[..n];
                 if let Some(f) = file.as_ref() {
@@ -622,6 +720,7 @@ fn run_download(
                     f(Err(AppError::net(msg.clone())));
                 }
                 let _ = tx.send(Err(AppError::net(msg)));
+                abort_cleanup(&inner, &mut resp, &mut file, &tmp_path);
                 return;
             }
         }
@@ -1266,5 +1365,276 @@ mod tests {
             assert_eq!(looks_like_audio(&p), want, "{name}");
             let _ = std::fs::remove_file(&p);
         }
+    }
+
+    /// 慢速 mock：分块发送 + 每块延迟，模拟「下载线程仍在跑」的播放中状态。
+    fn spawn_slow_mock(
+        data: Vec<u8>,
+        chunk: usize,
+        delay: Duration,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::Write as _;
+        use std::net::{TcpListener, TcpStream};
+
+        fn serve_slow(
+            conn: &mut TcpStream,
+            data: &[u8],
+            chunk: usize,
+            delay: Duration,
+        ) -> std::io::Result<()> {
+            use std::io::Read as _;
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = conn.read(&mut byte)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                head.push(byte[0]);
+                if head.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                if head.len() > 64 * 1024 {
+                    return Ok(());
+                }
+            }
+            let text = String::from_utf8_lossy(&head);
+            let start = text
+                .lines()
+                .find_map(|l| l.strip_prefix("Range: bytes="))
+                .and_then(|v| v.split('-').next())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let body = &data[start..];
+            let resp = if text.contains("Range:") {
+                format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                    start,
+                    data.len() - 1,
+                    data.len()
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+            };
+            conn.write_all(resp.as_bytes())?;
+            for part in body.chunks(chunk.max(1)) {
+                conn.write_all(part)?;
+                std::thread::sleep(delay);
+            }
+            Ok(())
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let mut conn = match conn {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let data = data.clone();
+                std::thread::spawn(move || {
+                    let _ = serve_slow(&mut conn, &data, chunk, delay);
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}/slow.bin"), server)
+    }
+
+    fn no_proxy_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+    }
+
+    /// ⑨ LM-02 回归：最后一个读端 drop 后，真实下载线程必须退出并清理 `.part`。
+    ///
+    /// 旧实现用 `Arc::strong_count <= 1` 判定取消，而下载线程自身持有 3 个
+    /// 强引用（worker / watch / run_download 参数），条件永远不成立——线程、
+    /// 连接和最多 64MB 音频缓冲会驻留到进程退出。
+    #[test]
+    fn reader_drop_stops_download_thread() {
+        let data = vec![0xABu8; 8 * 1024 * 1024];
+        let (url, server) = spawn_slow_mock(data, 32 * 1024, Duration::from_millis(3));
+        let (tmp, fin) = scratch("cancel-exit");
+        let PendingDownload { stream, done } = spawn_download(
+            url,
+            no_proxy_client(),
+            None,
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+
+        let mut s = stream;
+        let mut buf = [0u8; 4096];
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "read before cancel");
+        assert!(!s.is_cancelled());
+
+        let weak = Arc::downgrade(&s.0);
+        drop(s); // readers 1 → 0，触发取消
+        drop(done);
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while weak.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "download thread still alive after last reader dropped"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!tmp.exists(), ".part must be removed when the thread exits");
+        assert!(!fin.exists(), "cancelled stream must not produce a cache file");
+        drop(server);
+    }
+
+    /// ⑩ EOF 后线程驻留以支持回退 seek；读端一放手必须退出。
+    ///    （旧版驻留循环只看不可达的 strong_count，线程永远不退出。）
+    #[test]
+    fn parked_thread_exits_after_reader_drop() {
+        let total = 256 * 1024;
+        let data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let (url, server) = spawn_mock(data);
+        let (tmp, fin) = scratch("parked-exit");
+        let PendingDownload { stream, done } = spawn_download(
+            url,
+            no_proxy_client(),
+            None,
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+
+        let mut s = stream;
+        let mut sink = vec![0u8; 64 * 1024];
+        let mut got = 0usize;
+        loop {
+            let n = s.read(&mut sink).unwrap();
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        assert_eq!(got, total);
+        // 等 EOF 决策完成、线程进入驻留（parked）
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!s.is_cancelled());
+
+        let weak = Arc::downgrade(&s.0);
+        drop(s);
+        drop(done);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "parked download thread did not exit after reader drop"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(server);
+    }
+
+    /// ⑫ 背压等待中的线程也必须被取消唤醒（旧版在这里 sleep 循环，
+    ///    cancelled 又永远为假，读端没了就永久驻留）。
+    #[test]
+    fn backpressure_cancel_wakes_downloader() {
+        let data = vec![0xE7u8; 8 * 1024 * 1024];
+        let (url, server) = spawn_slow_mock(data, 64 * 1024, Duration::from_millis(1));
+        let (tmp, fin) = scratch("backpressure-cancel");
+        // 小上限：几百 KB 内就能真实进入背压等待，不必传 64MB
+        const TEST_LIMIT: usize = 512 * 1024;
+        let PendingDownload { stream, done } = spawn_download_with_limit(
+            url,
+            no_proxy_client(),
+            None,
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+            TEST_LIMIT,
+        )
+        .unwrap();
+
+        let mut s = stream;
+        let mut sink = [0u8; 4096];
+        assert!(s.read(&mut sink).unwrap() > 0);
+
+        // 等下载线程把缓冲填到上限：此时它必然停在背压等待里
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let len = {
+                let st = s.0.state.lock().unwrap_or_else(|p| p.into_inner());
+                st.buf.len()
+            };
+            if len >= TEST_LIMIT {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "buffer never reached limit (len={len})"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let weak = Arc::downgrade(&s.0);
+        drop(s);
+        drop(done);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while weak.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "download thread stuck in backpressure after reader drop"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!tmp.exists(), ".part must be cleaned up");
+        drop(server);
+    }
+
+    /// ⑪ 克隆体之间互不干扰：drop 一个 clone 不能取消仍在使用的读端。
+    #[test]
+    fn dropping_one_clone_keeps_download_alive() {
+        let data = vec![0xCDu8; 4 * 1024 * 1024];
+        let (url, server) = spawn_slow_mock(data, 64 * 1024, Duration::from_millis(2));
+        let (tmp, fin) = scratch("clone-cancel");
+        let pending = spawn_download(
+            url,
+            no_proxy_client(),
+            None,
+            tmp.clone(),
+            fin.clone(),
+            Box::new(|_| {}),
+        )
+        .unwrap();
+
+        let mut a = pending.stream;
+        let b = a.clone();
+        assert_eq!(a.0.readers.load(Ordering::SeqCst), 2);
+        drop(b);
+        assert_eq!(a.0.readers.load(Ordering::SeqCst), 1);
+        assert!(
+            !a.is_cancelled(),
+            "dropping one clone must not cancel the stream"
+        );
+
+        // 线程仍在下载：读端还能拿到数据
+        let mut sink = vec![0u8; 128 * 1024];
+        let n = a.read(&mut sink).unwrap();
+        assert!(n > 0, "stream must stay alive after one clone is dropped");
+
+        drop(pending.done);
+        drop(a);
+        drop(server);
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&fin);
     }
 }
